@@ -23,6 +23,7 @@ MSA는 하나의 큰 애플리케이션(모놀리식)을 독립 배포 가능한
 | 여러 서비스를 거친 요청 하나를 어떻게 추적하는가 | 분산 추적 (Micrometer + Zipkin) |
 | 죽은 상대를 계속 두드려 나까지 느려지는 것을 어떻게 막는가 | 서킷 브레이커 (Resilience4j) |
 | 세션을 공유하지 않는 서비스들이 로그인 상태를 어떻게 아는가 | JWT 기반 인증·인가 (Spring Security) |
+| 한 트랜잭션으로 묶을 수 없는 일을 어떻게 되돌리는가 | Saga 보상 트랜잭션 |
 
 ---
 
@@ -96,7 +97,7 @@ flowchart TB
 ```
 AppUser { id, username, password(BCrypt), role }
 Product { id, name, price, stock }
-Order   { id, userId, productId, quantity, totalPrice }
+Order   { id, userId, productId, quantity, totalPrice, status, cancelReason }
 ```
 
 | 엔드포인트 | 권한 |
@@ -115,9 +116,11 @@ Order   { id, userId, productId, quantity, totalPrice }
 4. order-service가 토큰을 **다시** 검증하고 `uid` 클레임에서 사용자를 확인합니다.
 5. Feign으로 product-service를 호출해 가격을 조회합니다(동기).
 6. `price × quantity`를 계산해 주문을 저장하고 **응답합니다**.
-7. 주문 생성 이벤트를 Kafka에 발행하고, product-service가 그 뒤에 재고를 차감합니다(비동기).
+7. 주문 생성 이벤트를 Kafka에 발행합니다. 이 시점의 주문 상태는 **PENDING**입니다.
+8. product-service가 재고 차감을 시도하고 **결과를 다시 이벤트로 알립니다**.
+9. order-service가 그 결과를 듣고 주문을 **CONFIRMED** 또는 **CANCELLED**로 마무리합니다.
 
-비즈니스 로직은 6번의 곱셈 하나가 전부입니다. 그 곱셈 한 번이 서비스 경계를 몇 번 건너가고 무엇을 검증해야 하는지가 학습 대상입니다.
+비즈니스 로직은 6번의 곱셈 하나가 전부입니다. 그 곱셈 한 번이 서비스 경계를 몇 번 건너가고, 무엇을 검증해야 하며, 실패하면 어떻게 되돌려야 하는지가 학습 대상입니다.
 
 ---
 
@@ -133,6 +136,7 @@ Order   { id, userId, productId, quantity, totalPrice }
 | **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | 주문 응답 이후에 재고가 차감됨 + product-service가 죽어 있는 동안 발행된 이벤트가 복구 후 처리됨 | **완료** |
 | **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | Zipkin에서 gateway→order→product가 한 줄로 보임 + 장애 시 즉시 실패 | **완료** |
 | **6** | JWT 인증·인가 (auth-service 추가, RBAC) | 토큰 없이 401, 권한 부족 시 403, 남의 주문은 조회 불가 | **완료** |
+| **7** | Saga 보상 트랜잭션 (주문 상태 + 재고 결과 이벤트) | 재고 부족 주문이 CANCELLED 로 되돌려지고 재고는 그대로 | **완료** |
 
 Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이후는 필요할 때 이어서 진행합니다.
 
@@ -512,6 +516,84 @@ admin 이 /api/orders/1 조회 → 404
 | 토큰 만료 | 1시간, 갱신 수단 없음 | 짧은 액세스 토큰 + 리프레시 토큰 |
 | 로그아웃 | 없음 (발급된 토큰은 만료까지 유효) | 블랙리스트 또는 짧은 만료 |
 | Kafka 이벤트 | 인증 정보 없음 | 이벤트에도 발행 주체를 남기고 컨슈머가 검증 |
+
+### Phase 7 — Saga 보상 트랜잭션
+
+Phase 4의 재고 차감에는 결함이 있었습니다. **재고가 부족하면 로그만 남기고 이벤트를 버려서, 주문은 "성공"으로 남고 재고는 그대로인 어긋난 상태**가 되었습니다.
+
+모놀리식이라면 하나의 트랜잭션으로 묶어 함께 롤백하면 됩니다. 그러나 서비스마다 DB가 분리되어 있으므로 그럴 수 없습니다. 대신 **결과를 알리고, 듣는 쪽이 스스로 되돌립니다.** 이것이 Saga입니다.
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant O as order-service
+    participant K as Kafka
+    participant P as product-service
+
+    C->>O: POST /api/orders
+    O->>O: 주문 저장 (status=PENDING)
+    O->>K: OrderCreatedEvent
+    O-->>C: 201 {status: "PENDING"}
+
+    K->>P: OrderCreatedEvent
+    alt 재고 충분
+        P->>P: 재고 차감
+        P->>K: StockResultEvent(reserved=true)
+        K->>O: 결과 수신
+        O->>O: status=CONFIRMED
+    else 재고 부족
+        P->>P: 차감하지 않음
+        P->>K: StockResultEvent(reserved=false, reason)
+        K->>O: 결과 수신
+        O->>O: status=CANCELLED (보상)
+    end
+```
+
+**PENDING이라는 중간 상태가 생기는 것이 핵심입니다.** 나누기 전에는 주문이 성공 아니면 실패 둘 중 하나였지만, 이제 "주문은 받았지만 아직 확정되지 않은" 구간이 반드시 존재합니다. `201 Created`의 의미도 "확정됐다"가 아니라 **"접수했다"**로 바뀝니다.
+
+#### 실측 결과
+
+```bash
+# 상품 2번 재고: 12
+curl ... -d '{"productId":2,"quantity":5}'    # 재고 안
+curl ... -d '{"productId":2,"quantity":100}'  # 재고 초과
+```
+
+응답 직후에는 둘 다 PENDING입니다.
+
+```json
+{"id":2,"quantity":5,"status":"PENDING"}
+{"id":3,"quantity":100,"status":"PENDING"}
+```
+
+잠시 뒤 Saga가 끝나면 갈립니다.
+
+```json
+{"id":2,"quantity":5,  "status":"CONFIRMED","cancelReason":null}
+{"id":3,"quantity":100,"status":"CANCELLED","cancelReason":"재고 부족 (요청 100, 남은 재고 7)"}
+```
+
+재고는 `12 - 5 = 7`로, **취소된 주문의 100은 차감되지 않았습니다.**
+
+#### 보상은 "롤백"이 아닙니다
+
+이미 커밋된 트랜잭션은 되돌릴 수 없습니다. 보상은 **되돌리는 효과를 내는 새로운 작업**입니다.
+
+여기서는 주문 상태를 CANCELLED로 바꾸는 것으로 끝나지만, 결제가 있었다면 환불을, 쿠폰을 썼다면 쿠폰 복구를 함께 해야 합니다. 그리고 **취소된 주문을 삭제하지 않고 사유와 함께 남깁니다** — 왜 취소됐는지가 사용자에게도 운영자에게도 필요한 정보이기 때문입니다.
+
+#### 코레오그래피 방식
+
+주문을 시작한 서비스가 결과도 받아 마무리합니다. 중앙에 흐름을 지시하는 조정자를 두는 오케스트레이션 방식도 있지만, 참여 서비스가 둘뿐인 지금은 조정자를 둘 이유가 없습니다. 참여자가 늘어 흐름을 한눈에 보기 어려워지면 그때 조정자를 도입합니다.
+
+#### 남은 문제 (코드에 `ponytail:` 주석으로 표시)
+
+| 문제 | 내용 | 해법 |
+|---|---|---|
+| **멱등성** | 같은 이벤트가 두 번 오면 재고가 두 번 깎입니다. Kafka는 at-least-once입니다 | 처리한 `orderId`를 기록해 두고 건너뛰기 |
+| **dual write** | DB 저장과 이벤트 발행이 한 트랜잭션이 아닙니다. 저장 직후 죽으면 재고는 깎였는데 결과가 발행되지 않아 주문이 PENDING으로 영원히 남습니다 | Transactional Outbox 패턴 |
+| **타임아웃** | 결과가 영영 오지 않는 PENDING 주문을 정리하는 장치가 없습니다 | 일정 시간 뒤 자동 취소하는 배치 |
+
+주문 상태 변경 쪽은 같은 값을 두 번 써도 결과가 같아(멱등) 문제가 없습니다. 위험한 것은 **재고 차감처럼 누적되는 연산**입니다.
 
 ---
 

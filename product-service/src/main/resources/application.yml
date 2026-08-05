@@ -21,6 +21,13 @@ spring:
       mode: always
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    template:
+      observation-enabled: true
     consumer:
       group-id: product-service
       # earliest: 컨슈머 그룹이 처음 만들어질 때 토픽의 맨 처음부터 읽는다.

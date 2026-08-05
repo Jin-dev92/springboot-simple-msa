@@ -25,6 +25,16 @@ spring:
       # 메시지 헤더에 추적 정보를 실어 보낸다. 이걸 켜야 Zipkin 에서
       # HTTP 요청과 그로 인해 발행된 Kafka 이벤트가 하나의 trace 로 묶인다.
       observation-enabled: true
+    consumer:
+      group-id: order-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.value.default.type: com.example.msa.order.StockResultEvent
+        spring.json.trusted.packages: com.example.msa.order
+    listener:
+      observation-enabled: true
 
   cloud:
     openfeign:

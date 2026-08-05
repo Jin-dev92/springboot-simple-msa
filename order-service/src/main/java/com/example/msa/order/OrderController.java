@@ -72,9 +72,13 @@ class OrderController {
      * 서킷 브레이커로 다룬다.
      *
      * <p><b>재고 차감은 비동기</b>다. 주문 응답에 재고를 담을 필요가 없으므로 Kafka 에
-     * 이벤트만 던지고 바로 응답한다. product-service 가 이벤트를 언제 처리하든 주문은 이미
-     * 성공한 상태다. 대신 "주문 직후 재고를 조회하면 아직 안 깎여 있을 수 있다"는 것을
-     * 받아들여야 한다. 이를 결과적 일관성(eventual consistency)이라고 한다.
+     * 이벤트만 던지고 바로 응답한다. 대신 "주문 직후 재고를 조회하면 아직 안 깎여 있을 수
+     * 있다"는 것을 받아들여야 한다. 이를 결과적 일관성(eventual consistency)이라고 한다.
+     *
+     * <p>그래서 이 시점의 주문은 <b>PENDING</b> 이다. 재고를 잡았는지 아직 모르기 때문이다.
+     * 결과가 돌아오면 {@link StockResultListener} 가 CONFIRMED 또는 CANCELLED 로 바꾼다.
+     * 201 이 "주문이 확정됐다"가 아니라 "주문 요청을 접수했다"라는 뜻이 된다는 점이
+     * 나누기 전과 달라진 부분이다.
      */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)

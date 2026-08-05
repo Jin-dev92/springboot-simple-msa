@@ -33,6 +33,7 @@ BigDecimal price = productService.findById(1L).getPrice();
 | 실패는 한 스택에 남는다 | 어디서 느려졌는지 어떻게 아는가 | 분산 추적 (Zipkin) |
 | 모든 일이 즉시 끝난다 | 지금 당장 안 해도 되는 일은 | 비동기 이벤트 (Kafka) |
 | 세션 하나로 로그인 상태를 안다 | 서비스마다 세션을 공유해야 하는가 | JWT 인증·인가 (Spring Security) |
+| 실패하면 트랜잭션이 함께 롤백된다 | DB 가 나뉘어 롤백할 수 없으면 | Saga 보상 트랜잭션 |
 
 > 이 표가 이 문서의 목차입니다.
 
@@ -62,7 +63,10 @@ flowchart TB
     gateway --> auth
     gateway --> order
     order --> product
-    order ==> kafka ==> product
+    order ==>|"OrderCreated"| kafka
+    kafka ==>|"OrderCreated"| product
+    product ==>|"StockResult"| kafka
+    kafka ==>|"StockResult"| order
 
     order -.-> eureka
     product -.-> eureka
@@ -70,6 +74,7 @@ flowchart TB
     gateway -.-> eureka
 
     gateway -.-> zipkin
+    auth -.-> zipkin
     order -.-> zipkin
     product -.-> zipkin
 ```
@@ -87,8 +92,8 @@ flowchart TB
 | `discovery-server/` | Eureka 서버. 클래스 1개가 전부 |
 | `auth-service/` | 로그인과 JWT 발급 |
 | `api-gateway/` | 라우팅 규칙(`application.yml`)이 본체 |
-| `product-service/` | 상품 조회 + 재고 차감 컨슈머 |
-| `order-service/` | 주문 생성 + Feign 호출 + 이벤트 발행 + 서킷 브레이커 |
+| `product-service/` | 상품 조회·등록 + 재고 차감 후 결과 발행 |
+| `order-service/` | 주문 생성 + Feign 호출 + 이벤트 발행 + 서킷 브레이커 + Saga 결과 처리 |
 
 ---
 
@@ -763,7 +768,180 @@ admin 이 /api/orders/1 조회 → 404
 
 ---
 
-## 10. 한 요청의 전 생애
+## 10. Saga — 롤백할 수 없을 때 되돌리는 법
+
+### 문제
+
+6절의 재고 차감에는 구멍이 있었습니다. 재고가 부족하면 로그만 남기고 이벤트를 버렸습니다. 그 결과는 이렇습니다.
+
+```
+order-service 의 DB:   주문 #3 — 모니터 100개, 32,000,000원  ← 성공한 것처럼 남음
+product-service 의 DB: 모니터 재고 7                          ← 아무 일도 없었음
+```
+
+**두 서비스가 서로 다른 사실을 믿고 있습니다.** 모놀리식이라면 하나의 트랜잭션으로 묶여 함께 롤백됐을 일입니다.
+
+```java
+@Transactional
+void createOrder() {
+    orderRepository.save(order);
+    product.decreaseStock(qty);   // 여기서 예외 → 위의 save 도 함께 취소
+}
+```
+
+이 한 줄짜리 안전장치가 서비스를 나누는 순간 사라집니다. **DB가 다르면 트랜잭션도 다릅니다.** 2단계 커밋(2PC)이라는 기법이 있긴 하지만, 참여자 하나가 응답하지 않으면 나머지 전부가 잠긴 채 기다려야 해서 마이크로서비스에서는 사실상 쓰지 않습니다.
+
+### 해법: 되돌리지 말고, 되돌리는 효과를 내는 일을 하나 더 한다
+
+Saga는 긴 트랜잭션 하나를 **여러 개의 짧은 로컬 트랜잭션**으로 쪼갭니다. 각 단계는 자기 DB에서 즉시 커밋하고, 뒤 단계가 실패하면 앞 단계를 **취소하는 새로운 작업**(보상 트랜잭션)을 실행합니다.
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant O as order-service
+    participant K as Kafka
+    participant P as product-service
+
+    C->>O: POST /api/orders
+    O->>O: 주문 저장 (PENDING) — 로컬 트랜잭션 ①커밋
+    O->>K: OrderCreatedEvent
+    O-->>C: 201 {status: "PENDING"}
+
+    K->>P: OrderCreatedEvent
+    alt 재고 충분
+        P->>P: 재고 차감 — 로컬 트랜잭션 ②커밋
+        P->>K: StockResultEvent(reserved=true)
+        K->>O: 결과 수신
+        O->>O: CONFIRMED
+    else 재고 부족
+        P->>P: 차감하지 않음
+        P->>K: StockResultEvent(reserved=false, reason)
+        K->>O: 결과 수신
+        O->>O: CANCELLED + 사유 기록 — 보상
+    end
+```
+
+### 상태 전이
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: 주문 접수
+    PENDING --> CONFIRMED: 재고 확보됨
+    PENDING --> CANCELLED: 재고 부족 (보상)
+    CONFIRMED --> [*]
+    CANCELLED --> [*]
+
+    note right of PENDING
+        나누기 전에는 없던 상태.
+        "받았지만 아직 확정되지 않음"
+    end note
+```
+
+**PENDING이라는 중간 상태가 생기는 것이 Saga의 가장 큰 변화입니다.** 나누기 전에는 주문이 성공 아니면 실패 둘 중 하나였습니다. 이제 `201 Created`의 의미가 "확정됐다"가 아니라 **"접수했다"**로 바뀝니다. UI도 "주문 완료"가 아니라 "주문 처리 중"을 보여줘야 합니다.
+
+### 코드
+
+| 파일 | 역할 |
+|---|---|
+| `order-service/.../OrderStatus.java` | PENDING / CONFIRMED / CANCELLED |
+| `order-service/.../Order.java` | `confirm()`, `cancel(reason)` — 보상이 여기 있다 |
+| `product-service/.../StockResultEvent.java` | 재고 처리 결과 (성공/실패 + 사유) |
+| `product-service/.../OrderCreatedListener.java` | 차감 시도 후 **반드시 결과를 발행** |
+| `order-service/.../StockResultListener.java` | 결과를 듣고 확정 또는 취소 |
+
+가장 중요한 변화는 product-service가 **실패해도 침묵하지 않게** 된 것입니다.
+
+```java
+// Phase 4: 실패하면 그냥 로그
+log.warn("재고 부족으로 차감하지 않음: ...");
+
+// Phase 7: 실패도 사실이므로 알린다
+return StockResultEvent.rejected(orderId, productId, quantity, "재고 부족 (요청 %d, 남은 재고 %d)");
+```
+
+### 보상은 롤백이 아닙니다
+
+이미 커밋된 트랜잭션은 되돌릴 수 없습니다. 보상은 **되돌리는 효과를 내는 새로운 작업**입니다. 차이가 드러나는 지점이 있습니다.
+
+| | 롤백 | 보상 |
+|---|---|---|
+| 흔적 | 아무 일도 없었던 것이 됨 | **취소했다는 기록이 남음** |
+| 중간 상태 | 외부에서 볼 수 없음 | **잠깐이지만 남들이 볼 수 있음** |
+| 범위 | DB가 알아서 | 결제 환불, 쿠폰 복구 등 직접 다 짜야 함 |
+
+두 번째가 특히 중요합니다. 주문 #3이 취소되기 전 짧은 순간, 조회하면 PENDING 주문이 실제로 보입니다. 이 구간을 없앨 수는 없고, **받아들이고 설계에 반영**해야 합니다.
+
+그래서 이 프로젝트는 취소된 주문을 **삭제하지 않고 사유와 함께 남깁니다.** 사용자에게도 운영자에게도 "왜 취소됐는가"가 필요한 정보이기 때문입니다.
+
+### 코레오그래피 vs 오케스트레이션
+
+```mermaid
+flowchart TB
+    subgraph cho ["코레오그래피 — 이 프로젝트"]
+        o1["order-service"] -->|"이벤트"| p1["product-service"]
+        p1 -->|"결과 이벤트"| o1
+        n1["조정자가 없다.<br/>각자 이벤트를 듣고 알아서 반응한다"]
+    end
+
+    subgraph orc ["오케스트레이션"]
+        s["Saga 조정자"] -->|"재고 잡아"| p2["product-service"]
+        s -->|"결제해"| pay["payment-service"]
+        s -->|"취소해"| p3["보상 지시"]
+        n2["흐름이 한 곳에 모여 있어 읽기 쉽다.<br/>대신 조정자가 단일 장애점이 된다"]
+    end
+```
+
+참여 서비스가 둘뿐인 지금은 조정자를 둘 이유가 없습니다. **참여자가 늘어 전체 흐름을 코드에서 따라가기 어려워지는 시점**이 오케스트레이션으로 옮길 때입니다.
+
+### 직접 확인
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"user","password":"user123"}' | jq -r .accessToken)
+
+order() { curl -s -X POST http://localhost:8080/api/orders \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"productId\":2,\"quantity\":$1}"; }
+
+order 5      # 재고 12 안쪽
+order 100    # 재고 초과
+
+curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" | jq -c '.[]'
+```
+
+응답 직후에는 둘 다 PENDING입니다.
+
+```json
+{"id":2,"quantity":5,"status":"PENDING"}
+{"id":3,"quantity":100,"status":"PENDING"}
+```
+
+잠시 뒤 Saga가 끝나면 갈립니다.
+
+```json
+{"id":2,"quantity":5,  "status":"CONFIRMED","cancelReason":null}
+{"id":3,"quantity":100,"status":"CANCELLED","cancelReason":"재고 부족 (요청 100, 남은 재고 7)"}
+```
+
+재고는 `12 - 5 = 7`이고, **취소된 주문의 100은 차감되지 않았습니다.** 두 서비스가 같은 사실을 믿는 상태로 되돌아왔습니다.
+
+### 남은 문제 세 가지
+
+코드에 `ponytail:` 주석으로 표시해 두었습니다.
+
+```mermaid
+flowchart LR
+    A["① 멱등성<br/>같은 이벤트 2번 →<br/>재고 2번 차감"] --> A2["처리한 orderId 기록"]
+    B["② dual write<br/>DB 저장 후 발행 전 죽으면<br/>PENDING 영구 잔류"] --> B2["Transactional Outbox"]
+    C["③ 타임아웃<br/>결과가 영영 안 오는<br/>PENDING 방치"] --> C2["일정 시간 뒤 자동 취소"]
+```
+
+①이 왜 재고에서만 문제인지 짚어둘 만합니다. Kafka는 at-least-once라 같은 메시지가 두 번 올 수 있는데, 주문 상태를 CONFIRMED로 두 번 쓰는 것은 결과가 같습니다(멱등). 반면 **재고 차감처럼 누적되는 연산**은 두 번 실행되면 값이 달라집니다. 어떤 연산이 멱등인지 구분하는 것이 이벤트 기반 설계의 기본기입니다.
+
+---
+
+## 11. 한 요청의 전 생애
 
 지금까지의 조각을 하나로 잇습니다. `POST /api/orders` 한 번에 벌어지는 일 전부입니다.
 
@@ -793,7 +971,7 @@ sequenceDiagram
     O->>P: GET /products/1 + trace id
     P-->>O: {price: 89000}
 
-    O->>O: totalPrice 계산, 주문 저장
+    O->>O: totalPrice 계산, 주문 저장 (PENDING)
     O->>K: OrderCreatedEvent 발행 + trace id
     O-->>G: 201 Created
     G-->>C: 201 {totalPrice: 356000}
@@ -802,6 +980,9 @@ sequenceDiagram
 
     K->>P: 이벤트 전달 + trace id
     P->>P: 재고 차감
+    P->>K: StockResultEvent
+    K->>O: 결과 전달
+    O->>O: 주문 확정 (CONFIRMED)
 
     G-->>Z: span
     O-->>Z: span
@@ -812,7 +993,7 @@ sequenceDiagram
 
 ---
 
-## 11. 이 프로젝트가 다루지 않은 것
+## 12. 이 프로젝트가 다루지 않은 것
 
 학습 범위를 좁히기 위해 의도적으로 제외한 것들입니다. 실무로 넘어갈 때 이어서 볼 주제입니다.
 
@@ -821,7 +1002,6 @@ sequenceDiagram
 | 중앙 설정 관리 (Config Server) | 서비스 4개는 각자 관리해도 부담이 없음 | 설정 변경을 재배포 없이 반영해야 할 때 |
 | 영속 DB | 인메모리 H2로 기동 속도를 택함 | 재시작에도 데이터가 남아야 할 때 |
 | DLQ / 보상 트랜잭션 | 재고 부족 이벤트를 로그만 남기고 버림 | 실패한 이벤트를 반드시 처리해야 할 때 |
-| 분산 트랜잭션 (Saga) | 재고 차감 실패 시 주문을 되돌리지 않음 | 여러 서비스에 걸친 정합성이 필요할 때 |
 | Kubernetes | Compose로 개념 이해가 충분함 | 실제 운영 배포 |
 | 메트릭·알림 (Prometheus) | 추적만으로 흐름 이해는 가능 | 운영 중 이상 징후를 감지해야 할 때 |
 

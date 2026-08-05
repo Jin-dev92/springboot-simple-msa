@@ -1,0 +1,32 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            # uri 의 lb:// 는 "Eureka 에서 이 이름으로 인스턴스를 찾아 부하를 나눠 보내라"는 뜻이다.
+            # http://localhost:8081 같은 실제 주소는 어디에도 등장하지 않는다.
+            - id: order-service
+              uri: lb://order-service
+              predicates:
+                - Path=/api/orders/**
+              filters:
+                # 앞의 경로 조각 1개(/api)를 떼고 전달한다. → 내부에서는 /orders/** 로 받는다.
+                - StripPrefix=1
+
+            - id: product-service
+              uri: lb://product-service
+              predicates:
+                - Path=/api/products/**
+              filters:
+                - StripPrefix=1
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka

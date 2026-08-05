@@ -94,7 +94,7 @@ Order   { id, productId, quantity, totalPrice }   POST /orders
 
 | Phase | 추가하는 것 | 검증 기준 | 상태 |
 |---|---|---|---|
-| **1** | 멀티모듈 골격, Eureka, 서비스 2개, Gateway, Feign | Eureka 대시보드에 3개 등록 확인 + `POST /api/orders` 성공 | 예정 |
+| **1** | 멀티모듈 골격, Eureka, 서비스 2개, Gateway, Feign | Eureka 대시보드에 3개 등록 확인 + `POST /api/orders` 성공 | **완료** |
 | **2** | 서비스별 Dockerfile, Docker Compose | `docker compose up` 한 번으로 Phase 1과 동일한 결과 | 예정 |
 | **3** | product-service 인스턴스 2개로 스케일 아웃 | 두 인스턴스 로그에 요청이 번갈아 들어오는지 확인 | 예정 |
 | **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | product-service가 죽어도 주문은 성공하고, 복구 시 재고가 반영됨 | 예정 |
@@ -105,8 +105,6 @@ Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이
 ---
 
 ## 5. 실행 방법
-
-> 아직 Phase 1을 구현하기 전이므로, 아래 명령은 구현 완료 시점부터 동작합니다.
 
 ### 사전 요구사항
 
@@ -124,7 +122,9 @@ Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이
 ./gradlew :api-gateway:bootRun         # 4.
 ```
 
-등록 확인은 브라우저에서 http://localhost:8761 을 열어 인스턴스 3개가 보이는지로 합니다.
+등록 확인은 브라우저에서 http://localhost:8761 을 열어 인스턴스 3개(`API-GATEWAY`, `ORDER-SERVICE`, `PRODUCT-SERVICE`)가 보이는지로 합니다.
+
+> 기동 직후에는 호출이 실패할 수 있습니다. Eureka 클라이언트는 기본적으로 30초 주기로 레지스트리를 갱신하므로, 서비스가 떠 있어도 게이트웨이가 그 사실을 알기까지 시간이 걸립니다. 1분 정도 기다린 뒤 다시 시도하면 됩니다.
 
 동작 확인:
 
@@ -132,6 +132,10 @@ Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이
 curl -X POST http://localhost:8080/api/orders \
   -H 'Content-Type: application/json' \
   -d '{"productId": 1, "quantity": 3}'
+# {"id":1,"productId":1,"quantity":3,"totalPrice":267000.00}
+
+curl http://localhost:8080/api/products/1
+# {"id":1,"name":"키보드","price":89000.00,"stock":30}
 ```
 
 ### Phase 2 — Docker Compose로 한 번에

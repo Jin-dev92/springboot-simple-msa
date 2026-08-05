@@ -1,0 +1,36 @@
+plugins {
+    // 루트 프로젝트 자체는 애플리케이션이 아니므로 플러그인을 적용하지 않고 버전만 선언한다.
+    id 'org.springframework.boot' version '3.5.3' apply false
+}
+
+subprojects {
+    apply plugin: 'java'
+    apply plugin: 'org.springframework.boot'
+
+    group = 'com.example.msa'
+    version = '0.0.1-SNAPSHOT'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    repositories {
+        mavenCentral()
+    }
+
+    dependencies {
+        // BOM(Bill of Materials): 개별 라이브러리 버전을 일일이 적지 않아도
+        // 서로 호환되는 조합을 한 번에 고정해 주는 의존성 목록이다.
+        implementation platform('org.springframework.boot:spring-boot-dependencies:3.5.3')
+        implementation platform('org.springframework.cloud:spring-cloud-dependencies:2025.0.0')
+
+        testImplementation 'org.springframework.boot:spring-boot-starter-test'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    tasks.named('test') {
+        useJUnitPlatform()
+    }
+}

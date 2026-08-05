@@ -1,4 +1,7 @@
 dependencies {
+    // JWT 검증. 게이트웨이를 통과했다는 사실을 그대로 신뢰하지 않고 각자 다시 확인한다.
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
     // Spring Cloud 2025.0.0 부터 게이트웨이 스타터 이름이 세분화되었다.
     // (구 spring-cloud-starter-gateway = WebFlux 기반 서버)
     implementation 'org.springframework.cloud:spring-cloud-starter-gateway-server-webflux'

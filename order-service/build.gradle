@@ -1,4 +1,7 @@
 dependencies {
+    // JWT 검증. 게이트웨이를 통과했다는 사실을 그대로 신뢰하지 않고 각자 다시 확인한다.
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-validation'

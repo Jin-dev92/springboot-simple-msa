@@ -9,6 +9,14 @@ spring:
       server:
         webflux:
           routes:
+            # 로그인은 토큰을 받기 위한 통로이므로 인증 없이 통과시킨다.
+            - id: auth-service
+              uri: lb://auth-service
+              predicates:
+                - Path=/api/auth/**
+              filters:
+                - StripPrefix=1
+
             # uri 의 lb:// 는 "Eureka 에서 이 이름으로 인스턴스를 찾아 부하를 나눠 보내라"는 뜻이다.
             # http://localhost:8081 같은 실제 주소는 어디에도 등장하지 않는다.
             - id: order-service
@@ -42,3 +50,8 @@ management:
   zipkin:
     tracing:
       endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+
+jwt:
+  # 모든 서비스가 같은 열쇠를 알아야 서명을 검증할 수 있다.
+  # 경고: 학습용 기본값이다. 실제 서비스에서는 Secrets Manager/Vault 로 주입해야 한다.
+  secret: ${JWT_SECRET:learning-only-secret-key-do-not-use-in-production-32bytes+}

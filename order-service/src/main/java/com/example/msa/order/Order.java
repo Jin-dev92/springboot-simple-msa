@@ -16,6 +16,10 @@ public class Order {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // 누구의 주문인지. JWT 의 uid 클레임에서 가져온다.
+    // 이 값이 없으면 "인증된 사용자"까지만 알 뿐 "본인 것인지"는 판단할 수 없다.
+    private Long userId;
+
     // product-service 의 데이터를 외래키로 묶지 않고 id 값만 들고 있는다.
     // 서비스마다 DB 가 분리되어 있으므로 DB 차원의 join 이나 제약조건은 존재할 수 없다.
     private Long productId;
@@ -28,7 +32,8 @@ public class Order {
         // JPA 기본 생성자
     }
 
-    public Order(Long productId, int quantity, BigDecimal totalPrice) {
+    public Order(Long userId, Long productId, int quantity, BigDecimal totalPrice) {
+        this.userId = userId;
         this.productId = productId;
         this.quantity = quantity;
         this.totalPrice = totalPrice;
@@ -36,6 +41,10 @@ public class Order {
 
     public Long getId() {
         return id;
+    }
+
+    public Long getUserId() {
+        return userId;
     }
 
     public Long getProductId() {

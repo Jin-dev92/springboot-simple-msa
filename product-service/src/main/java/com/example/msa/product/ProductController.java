@@ -1,12 +1,21 @@
 package com.example.msa.product;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -34,11 +43,28 @@ class ProductController {
         return repository.findAll();
     }
 
+    /**
+     * 상품 등록. 접근 제어는 여기가 아니라 {@link SecurityConfig} 에 선언되어 있다
+     * ({@code hasRole("ADMIN")}). 인증된 사용자라도 ROLE_ADMIN 이 아니면 403 이 난다.
+     */
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    Product create(@Valid @RequestBody ProductRequest request) {
+        log.info("상품 등록: name={}", request.name());
+        return repository.save(new Product(request.name(), request.price(), request.stock()));
+    }
+
     @GetMapping("/{id}")
     Product findById(@PathVariable Long id) {
         log.info("상품 조회 요청: id={}", id);
         return repository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.NOT_FOUND, "상품을 찾을 수 없습니다: " + id));
+    }
+
+    record ProductRequest(
+            @NotBlank String name,
+            @NotNull @Positive BigDecimal price,
+            @PositiveOrZero int stock) {
     }
 }

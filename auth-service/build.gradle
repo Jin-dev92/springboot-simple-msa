@@ -1,12 +1,12 @@
 dependencies {
-    // JWT 검증. 게이트웨이를 통과했다는 사실을 그대로 신뢰하지 않고 각자 다시 확인한다.
-    implementation 'org.springframework.boot:spring-boot-starter-security'
-    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    // 토큰 발급(NimbusJwtEncoder)과 검증에 필요한 JOSE 구현이 여기 들어 있다.
+    // jjwt 같은 외부 라이브러리를 따로 추가하지 않고 스프링 표준 스택으로 해결한다.
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
-    implementation 'org.springframework.kafka:spring-kafka'
     // 분산 추적: 요청이 서비스 경계를 넘어갈 때 trace id 를 이어 붙여 Zipkin 으로 보낸다.
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'io.micrometer:micrometer-tracing-bridge-brave'

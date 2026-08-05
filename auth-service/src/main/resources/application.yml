@@ -1,0 +1,39 @@
+server:
+  port: 0
+
+spring:
+  application:
+    name: auth-service
+  datasource:
+    url: jdbc:h2:mem:authdb
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+# 토큰 서명 열쇠. 모든 서비스가 같은 값을 알고 있어야 검증이 된다.
+#
+# 경고: 학습용이라 기본값을 코드에 두었다. 실제 서비스에서는 절대 이렇게 하지 않는다.
+#   - 저장소에 올라간 열쇠는 이미 유출된 열쇠다.
+#   - AWS Secrets Manager, Vault 같은 비밀 관리 도구에서 주입해야 한다.
+#   - 대칭키(HS256)라 이 값을 아는 모든 서비스가 토큰을 '발급'할 수도 있다.
+#     서비스 하나가 뚫리면 임의의 ADMIN 토큰이 만들어질 수 있다는 뜻이다.
+#     실무에서는 비대칭키(RS256)로 auth-service 만 서명하게 한다.
+jwt:
+  secret: ${JWT_SECRET:learning-only-secret-key-do-not-use-in-production-32bytes+}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}

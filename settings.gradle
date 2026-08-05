@@ -2,6 +2,7 @@ rootProject.name = 'springboot-simple-msa'
 
 // 각 서비스는 독립 배포 단위지만, 학습 편의를 위해 하나의 저장소에서 함께 빌드한다.
 include 'discovery-server'
+include 'auth-service'
 include 'api-gateway'
 include 'product-service'
 include 'order-service'

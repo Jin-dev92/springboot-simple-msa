@@ -27,6 +27,7 @@ subprojects {
         implementation platform('org.springframework.cloud:spring-cloud-dependencies:2025.0.0')
 
         testImplementation 'org.springframework.boot:spring-boot-starter-test'
+        testImplementation 'org.springframework.security:spring-security-test'
         testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
 

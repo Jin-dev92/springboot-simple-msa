@@ -32,6 +32,7 @@ BigDecimal price = productService.findById(1L).getPrice();
 | 호출은 그냥 성공한다 | 상대가 죽어 있으면 어떻게 되는가 | 서킷 브레이커 (Resilience4j) |
 | 실패는 한 스택에 남는다 | 어디서 느려졌는지 어떻게 아는가 | 분산 추적 (Zipkin) |
 | 모든 일이 즉시 끝난다 | 지금 당장 안 해도 되는 일은 | 비동기 이벤트 (Kafka) |
+| 세션 하나로 로그인 상태를 안다 | 서비스마다 세션을 공유해야 하는가 | JWT 인증·인가 (Spring Security) |
 
 > 이 표가 이 문서의 목차입니다.
 
@@ -49,6 +50,7 @@ flowchart TB
 
     subgraph net ["Docker Compose 네트워크"]
         gateway["api-gateway<br/>:8080 · 외부 공개"]
+        auth["auth-service<br/>랜덤 포트 · 비공개"]
         order["order-service<br/>랜덤 포트 · 비공개"]
         product["product-service<br/>랜덤 포트 · 비공개"]
         eureka[("discovery-server<br/>:8761 · 외부 공개")]
@@ -57,12 +59,14 @@ flowchart TB
     end
 
     client --> gateway
+    gateway --> auth
     gateway --> order
     order --> product
     order ==> kafka ==> product
 
     order -.-> eureka
     product -.-> eureka
+    auth -.-> eureka
     gateway -.-> eureka
 
     gateway -.-> zipkin
@@ -70,17 +74,18 @@ flowchart TB
     product -.-> zipkin
 ```
 
-**외부에 열린 포트는 셋뿐입니다.** 8080(게이트웨이), 8761(Eureka 대시보드), 9411(Zipkin UI). order-service와 product-service는 호스트 포트를 갖지 않으므로, 외부에서 이 둘을 직접 부를 방법이 없습니다. 게이트웨이를 우회할 수 없는 구조가 설정으로 강제되어 있습니다.
+**외부에 열린 포트는 셋뿐입니다.** 8080(게이트웨이), 8761(Eureka 대시보드), 9411(Zipkin UI). auth-service, order-service, product-service는 호스트 포트를 갖지 않으므로 외부에서 직접 부를 방법이 없습니다. 게이트웨이를 우회할 수 없는 구조가 설정으로 강제되어 있습니다.
 
 ### 코드 지도
 
 | 파일 | 역할 |
 |---|---|
-| `settings.gradle` | 4개 서브프로젝트 등록 |
+| `settings.gradle` | 5개 서브프로젝트 등록 |
 | `build.gradle` | 공통 설정(Java 21, BOM, `jar` 태스크 비활성화) |
-| `Dockerfile` | 4개 서비스가 공유하는 단일 이미지 정의 |
+| `Dockerfile` | 5개 서비스가 공유하는 단일 이미지 정의 |
 | `docker-compose.yml` | 컨테이너 구성, 기동 순서, 환경변수 주입 |
 | `discovery-server/` | Eureka 서버. 클래스 1개가 전부 |
+| `auth-service/` | 로그인과 JWT 발급 |
 | `api-gateway/` | 라우팅 규칙(`application.yml`)이 본체 |
 | `product-service/` | 상품 조회 + 재고 차감 컨슈머 |
 | `order-service/` | 주문 생성 + Feign 호출 + 이벤트 발행 + 서킷 브레이커 |
@@ -166,7 +171,7 @@ curl -s -H 'Accept: application/json' http://localhost:8761/eureka/apps \
 
 ### 문제
 
-서비스가 4개면 클라이언트는 4개의 주소를 알아야 합니다. 서비스를 쪼갤 때마다 클라이언트(웹, 앱)를 함께 고쳐야 한다면, 서비스를 나눈 이점이 사라집니다.
+서비스가 여러 개면 클라이언트는 그 주소를 전부 알아야 합니다. 서비스를 쪼갤 때마다 클라이언트(웹, 앱)를 함께 고쳐야 한다면, 서비스를 나눈 이점이 사라집니다.
 
 ### 해법
 
@@ -581,7 +586,179 @@ flowchart LR
 
 ---
 
-## 9. 한 요청의 전 생애
+## 9. 인증·인가 — 세션 없이 로그인 상태를 다루기
+
+### 문제
+
+모놀리식에서는 로그인하면 서버가 세션을 만들고 쿠키로 세션 id를 돌려줍니다. 이후 요청은 그 id로 "누구인가"를 알 수 있습니다. 서버가 상태를 들고 있기 때문입니다.
+
+서비스가 5개면 어떻게 될까요? 각 서비스가 그 세션을 알아야 합니다. 세션 저장소를 공유하면 그 저장소가 단일 장애점이 되고, 서비스 사이에 새로운 결합이 생깁니다.
+
+### 해법: 상태를 토큰 안에 넣는다
+
+JWT(JSON Web Token)는 사용자 정보를 담고 **서명**이 붙은 문자열입니다. 서버가 아무것도 기억하지 않아도, 서명만 검증하면 내용을 믿을 수 있습니다.
+
+```
+헤더.페이로드.서명
+
+eyJhbGciOiJIUzI1NiJ9 . eyJzdWIiOiJ1c2VyIiwidWlkIjoxLCJyb2xlcyI6WyJST0xFX1VTRVIiXX0 . 5nQ...
+   알고리즘              담긴 내용(누구나 읽을 수 있음)              위조 방지용 서명
+```
+
+**공유해야 하는 것이 세션 저장소가 아니라 열쇠 하나로 줄어듭니다.**
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant G as api-gateway
+    participant A as auth-service
+    participant O as order-service
+
+    C->>G: POST /api/auth/login {user, user123}
+    G->>A: (인증 없이 통과)
+    A->>A: BCrypt 로 비밀번호 대조
+    A->>A: JWT 생성 + 열쇠로 서명
+    A-->>C: {accessToken: "eyJ..."}
+
+    Note over C: 이후 모든 요청에 토큰을 실어 보낸다
+
+    C->>G: POST /api/orders + Authorization: Bearer eyJ...
+    G->>G: ① 서명 검증 + 경로별 권한 확인
+    G->>O: 요청 전달 (토큰도 함께)
+    O->>O: ② 서명 다시 검증 + uid 클레임 추출
+    O-->>C: 201 Created
+```
+
+### 코드
+
+| 파일 | 역할 |
+|---|---|
+| `auth-service/.../AuthController.java` | 로그인. 실패 사유를 구분해 알려주지 않는다 |
+| `auth-service/.../JwtIssuer.java` | 클레임 구성과 서명 |
+| `auth-service/.../SecurityConfig.java` | BCrypt 인코더, `JwtEncoder` |
+| `api-gateway/.../SecurityConfig.java` | 리액티브 검증(첫 검문) |
+| `order-service/.../SecurityConfig.java` | 서블릿 검증(재검증) |
+| `product-service/.../SecurityConfig.java` | 서블릿 검증 + ADMIN 규칙 |
+
+`jjwt` 같은 외부 라이브러리를 쓰지 않았습니다. 스프링 시큐리티에 이미 `NimbusJwtEncoder`/`NimbusJwtDecoder`가 들어 있어, 발급도 검증도 표준 스택 안에서 끝납니다.
+
+### 비밀번호는 해시로만 저장합니다
+
+```java
+repository.save(new AppUser("user", encoder.encode("user123"), "ROLE_USER"));
+```
+
+BCrypt는 같은 비밀번호라도 매번 다른 salt를 섞으므로 해시값이 매번 달라지고, **의도적으로 느리게** 설계되어 있어 대량 대입 공격에 시간 비용을 강제합니다. 저장된 값은 `$2a$`로 시작하는 해시이며 원문으로 되돌릴 수 없습니다.
+
+### 왜 두 번 검증하는가
+
+```mermaid
+flowchart TB
+    subgraph bad ["게이트웨이만 검증"]
+        a1(["공격자<br/>내부 네트워크 진입"]) -->|"게이트웨이를 우회"| b1["order-service<br/>무방비"]
+        b1 --> c1["전체 데이터 접근"]
+    end
+
+    subgraph good ["이 프로젝트 — 각자 검증"]
+        a2(["공격자<br/>내부 네트워크 진입"]) -->|"게이트웨이를 우회"| b2["order-service<br/>토큰 요구"]
+        b2 -->|"401"| c2["차단"]
+    end
+```
+
+게이트웨이는 첫 검문일 뿐입니다. **검증은 데이터를 실제로 가지고 있는 쪽에서 해야 합니다.** 이 원칙을 zero trust라고 합니다.
+
+### 인가는 두 층입니다
+
+여기가 이 절에서 가장 중요한 부분입니다.
+
+```mermaid
+flowchart TB
+    R["요청 도착"] --> A{"① 인증<br/>토큰이 유효한가?"}
+    A -->|"아니오"| E401["401 Unauthorized<br/>누구인지 모르겠다"]
+    A -->|"예"| B{"② 수직적 인가 (RBAC)<br/>이 역할이 이 일을 할 수 있는가?"}
+    B -->|"아니오"| E403["403 Forbidden<br/>알지만 안 된다"]
+    B -->|"예"| C{"③ 수평적 인가<br/>이 데이터가 이 사람 것인가?"}
+    C -->|"아니오"| E404["404 Not Found<br/>존재조차 알려주지 않는다"]
+    C -->|"예"| OK["처리"]
+```
+
+**②까지만 하고 ③을 빠뜨리는 것이 매우 흔한 실수입니다.** 역할 검사는 "무엇을 할 수 있는가"만 봅니다. "누구의 데이터인가"는 전혀 보지 않습니다.
+
+Phase 6 이전의 이 프로젝트가 정확히 그 상태였습니다. `GET /orders`가 모든 사람의 주문을 반환했습니다. 이런 결함을 IDOR(Insecure Direct Object Reference)라고 합니다.
+
+해결은 조회 단계에서부터 사용자를 조건에 넣는 것입니다.
+
+```java
+// 위험: 전부 가져온 뒤 자바 코드에서 거른다 → 거르는 코드를 빠뜨리면 전체 노출
+repository.findAll();
+
+// 안전: 조회 자체에 사용자가 들어간다
+repository.findByUserId(userIdOf(jwt));
+```
+
+**사용자 id를 요청 파라미터로 받지 않는 것**도 핵심입니다. `?userId=2`로 받으면 그 값을 바꿔 남의 데이터를 볼 수 있습니다. 반드시 서명이 검증된 토큰에서 꺼내야 합니다.
+
+### 직접 확인
+
+```bash
+login() { curl -s -X POST http://localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$1\",\"password\":\"$2\"}" | jq -r .accessToken; }
+
+USER_T=$(login user user123)
+ADMIN_T=$(login admin admin123)
+```
+
+실측 결과입니다.
+
+| 요청 | 토큰 없음 | USER | ADMIN |
+|---|---|---|---|
+| `GET /api/products/1` | 200 | 200 | 200 |
+| `POST /api/orders` | 401 | 201 | 201 |
+| `POST /api/products` | 401 | **403** | 201 |
+
+수평적 인가:
+
+```
+user  의 목록 → [id 1,2,3,4]  (userId=1)
+admin 의 목록 → [id 5]         (userId=2)  ← ADMIN 이어도 남의 주문은 안 보인다
+admin 이 /api/orders/1 조회 → 404
+```
+
+**ADMIN이라도 남의 주문은 보이지 않습니다.** 관리자 권한은 "상품을 등록할 수 있다"이지 "모든 주문을 볼 수 있다"가 아닙니다.
+
+**남의 주문 조회가 403이 아니라 404인 이유**는 403이 "그 주문은 존재하지만 네 것이 아니다"라는 정보를 흘리기 때문입니다.
+
+### 위조 시도
+
+```bash
+# 페이로드의 roles 를 ROLE_ADMIN 으로 바꾸고 서명은 원본 그대로 붙인다
+```
+
+```
+페이로드를 ROLE_ADMIN 으로 위조  → 401
+서명부를 다른 값으로 교체        → 401
+```
+
+서명은 **헤더와 페이로드 전체**에 대해 계산되므로, 내용을 한 글자라도 바꾸면 서명이 맞지 않게 됩니다. 열쇠를 모르면 올바른 서명을 새로 만들 수도 없습니다.
+
+> **JWT는 서명될 뿐 암호화되지 않습니다.** 페이로드는 누구나 base64 디코딩으로 열어볼 수 있습니다. 변조는 막지만 열람은 막지 못하므로, 비밀번호나 개인정보를 클레임에 담아서는 안 됩니다.
+
+### 의도적으로 남긴 한계
+
+| 항목 | 현재 | 실무에서는 |
+|---|---|---|
+| 열쇠 관리 | 저장소에 기본값이 있음 | Secrets Manager / Vault. **저장소에 올라간 열쇠는 이미 유출된 열쇠** |
+| 서명 알고리즘 | HS256 (대칭키) | RS256 (비대칭키) |
+| 토큰 만료 | 1시간, 갱신 없음 | 짧은 액세스 토큰 + 리프레시 토큰 |
+| 로그아웃 | 없음 | 블랙리스트 또는 짧은 만료 |
+| Kafka 이벤트 | 인증 정보 없음 | 발행 주체를 남기고 컨슈머가 검증 |
+
+**대칭키(HS256)의 한계는 특히 짚어둘 만합니다.** 서명과 검증에 같은 열쇠를 쓰므로, 검증만 하면 되는 product-service도 **토큰을 발급할 수 있는 열쇠**를 갖게 됩니다. 서비스 하나가 뚫리면 공격자가 임의의 ADMIN 토큰을 만들어 낼 수 있다는 뜻입니다. 비대칭키(RS256)를 쓰면 auth-service만 개인키로 서명하고 나머지는 공개키로 검증만 하게 되어 이 문제가 사라집니다.
+
+---
+
+## 10. 한 요청의 전 생애
 
 지금까지의 조각을 하나로 잇습니다. `POST /api/orders` 한 번에 벌어지는 일 전부입니다.
 
@@ -596,14 +773,16 @@ sequenceDiagram
     participant K as Kafka
     participant Z as Zipkin
 
-    C->>G: POST /api/orders
+    C->>G: POST /api/orders + Bearer 토큰
     Note over G: trace id 생성
+    G->>G: JWT 서명 검증 (첫 검문)
 
     G->>G: Path=/api/orders/** 규칙 매칭
     G->>E: (캐시된 레지스트리에서) order-service 조회
     G->>G: 인스턴스 하나 선택 (로드밸런싱)
     G->>O: POST /orders + trace id
 
+    O->>O: JWT 재검증 + uid 클레임 추출
     Note over O: 서킷 브레이커 CLOSED 확인
     O->>E: (캐시에서) product-service 조회
     O->>P: GET /products/1 + trace id
@@ -628,14 +807,13 @@ sequenceDiagram
 
 ---
 
-## 10. 이 프로젝트가 다루지 않은 것
+## 11. 이 프로젝트가 다루지 않은 것
 
 학습 범위를 좁히기 위해 의도적으로 제외한 것들입니다. 실무로 넘어갈 때 이어서 볼 주제입니다.
 
 | 주제 | 왜 제외했는가 | 언제 필요한가 |
 |---|---|---|
 | 중앙 설정 관리 (Config Server) | 서비스 4개는 각자 관리해도 부담이 없음 | 설정 변경을 재배포 없이 반영해야 할 때 |
-| 인증·인가 | 게이트웨이에서 JWT 검증하는 것이 일반적 | 사실상 항상 |
 | 영속 DB | 인메모리 H2로 기동 속도를 택함 | 재시작에도 데이터가 남아야 할 때 |
 | DLQ / 보상 트랜잭션 | 재고 부족 이벤트를 로그만 남기고 버림 | 실패한 이벤트를 반드시 처리해야 할 때 |
 | 분산 트랜잭션 (Saga) | 재고 차감 실패 시 주문을 되돌리지 않음 | 여러 서비스에 걸친 정합성이 필요할 때 |

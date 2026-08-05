@@ -95,7 +95,7 @@ Order   { id, productId, quantity, totalPrice }   POST /orders
 | Phase | 추가하는 것 | 검증 기준 | 상태 |
 |---|---|---|---|
 | **1** | 멀티모듈 골격, Eureka, 서비스 2개, Gateway, Feign | Eureka 대시보드에 3개 등록 확인 + `POST /api/orders` 성공 | **완료** |
-| **2** | 서비스별 Dockerfile, Docker Compose | `docker compose up` 한 번으로 Phase 1과 동일한 결과 | 예정 |
+| **2** | Dockerfile, Docker Compose | `docker compose up` 한 번으로 Phase 1과 동일한 결과 | **완료** |
 | **3** | product-service 인스턴스 2개로 스케일 아웃 | 두 인스턴스 로그에 요청이 번갈아 들어오는지 확인 | 예정 |
 | **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | product-service가 죽어도 주문은 성공하고, 복구 시 재고가 반영됨 | 예정 |
 | **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | Zipkin에서 gateway→order→product가 한 줄로 보임 + 장애 시 fallback 응답 | 예정 |
@@ -141,9 +141,42 @@ curl http://localhost:8080/api/products/1
 ### Phase 2 — Docker Compose로 한 번에
 
 ```bash
-./gradlew build
+./gradlew clean build      # 실행 가능한 jar 를 먼저 만든다
 docker compose up --build
 ```
+
+동작 확인은 Phase 1과 동일한 `curl`을 씁니다. 종료는 `docker compose down`입니다.
+
+컨테이너로 옮기면서 새로 부딪히는 문제가 셋 있고, 각각을 이렇게 해결했습니다.
+
+**1. `localhost:8761`이 통하지 않는다**
+
+컨테이너 안에서 `localhost`는 호스트가 아니라 자기 자신입니다. 그래서 Eureka 주소를 환경변수로 주입 가능하게 바꿨습니다.
+
+```yaml
+defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
+```
+
+`${변수:기본값}` 형태이므로 로컬 실행(Phase 1)은 그대로 동작하고, Compose에서는 `EUREKA_SERVER_URL=http://discovery-server:8761/eureka`로 덮어씁니다. 여기서 `discovery-server`는 Compose가 서비스 이름을 DNS 이름으로 등록해 준 것입니다.
+
+**2. `depends_on`은 "준비 완료"를 기다리지 않는다**
+
+`depends_on`만 쓰면 Compose는 컨테이너가 **시작**된 것까지만 보장합니다. Eureka가 아직 포트를 열기 전에 나머지가 등록을 시도하면 실패 스택트레이스가 쌓입니다(재시도로 결국 복구되지만 약 30초가 걸립니다). 그래서 헬스체크를 붙이고 `condition: service_healthy`로 실제 준비 완료를 기다립니다.
+
+```yaml
+healthcheck:
+  test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8761"]
+```
+
+`curl`을 설치하는 대신 bash의 `/dev/tcp` 기능으로 포트만 확인합니다. 이미지에 추가로 설치할 것이 없습니다.
+
+**3. `-plain.jar`이 같이 만들어진다**
+
+Gradle의 `java` 플러그인은 라이브러리용 `*-plain.jar`를, Spring Boot 플러그인은 실행 가능한 `*.jar`를 각각 만듭니다. Dockerfile이 `*.jar`로 복사하면 두 개가 잡혀 빌드가 실패하므로, 루트 `build.gradle`에서 `jar` 태스크를 꺼 뒀습니다.
+
+**Dockerfile은 하나만 둡니다.** Spring Boot 실행 가능 jar는 어느 서비스든 실행 방법이 같기 때문입니다. 어떤 모듈을 담을지는 Compose가 `SERVICE` 빌드 인자로 전달합니다.
+
+**포트는 게이트웨이(8080)와 Eureka(8761)만 엽니다.** product-service와 order-service는 호스트 포트를 열지 않으므로 외부에서 직접 접근할 방법이 없고, 반드시 게이트웨이를 거쳐야 합니다.
 
 ---
 

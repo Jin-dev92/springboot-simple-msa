@@ -23,7 +23,9 @@ spring:
 eureka:
   client:
     service-url:
-      defaultZone: http://localhost:8761/eureka
+      # 컨테이너 안에서 localhost 는 자기 자신이므로, Docker 로 띄울 때는
+      # EUREKA_SERVER_URL 환경변수로 discovery-server 를 가리키게 덮어쓴다.
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
   instance:
     # 포트가 매번 달라지므로, 인스턴스를 구분할 고유 ID 를 직접 만들어 준다.
     # (Phase 3 에서 같은 서비스를 여러 개 띄울 때 필요하다.)

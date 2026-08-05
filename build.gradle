@@ -33,4 +33,10 @@ subprojects {
     tasks.named('test') {
         useJUnitPlatform()
     }
+
+    // java 플러그인의 기본 jar 태스크는 라이브러리용 '-plain.jar' 를 함께 만든다.
+    // 실행 가능한 것은 bootJar 뿐이므로, Dockerfile 이 잘못된 jar 를 집지 않도록 꺼 둔다.
+    tasks.named('jar') {
+        enabled = false
+    }
 }

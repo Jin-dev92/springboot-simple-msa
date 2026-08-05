@@ -1,0 +1,69 @@
+# compose 가 서비스 이름(discovery-server 등)을 DNS 이름으로 등록해 주므로,
+# 컨테이너끼리는 IP 를 몰라도 이름만으로 서로를 찾을 수 있다.
+# 다만 그 DNS 로 찾을 수 있는 것은 '컨테이너'까지이고, 어떤 인스턴스가 살아 있는지,
+# 몇 개가 떠 있는지를 다루는 것은 여전히 Eureka 의 몫이다.
+
+services:
+  discovery-server:
+    build:
+      context: .
+      args:
+        SERVICE: discovery-server
+    ports:
+      - "8761:8761"   # Eureka 대시보드를 브라우저로 확인하기 위해 외부에 연다.
+    healthcheck:
+      # bash 의 /dev/tcp 로 포트가 열렸는지만 확인한다. curl 을 설치할 필요가 없다.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8761"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  api-gateway:
+    build:
+      context: .
+      args:
+        SERVICE: api-gateway
+    ports:
+      - "8080:8080"   # 외부로 열리는 유일한 진입점
+    depends_on:
+      # service_healthy: 컨테이너가 '시작'된 것이 아니라 '준비 완료'될 때까지 기다린다.
+      # 이게 없으면 Eureka 가 아직 포트를 열기 전에 등록을 시도해 실패 로그가 쌓인다.
+      discovery-server:
+        condition: service_healthy
+    environment:
+      EUREKA_SERVER_URL: http://discovery-server:8761/eureka
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      # 레지스트리를 얼마나 자주 갱신할지. 기본값 30초는 학습 중 기다리기 답답해서 줄였다.
+      EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+
+  # product-service 와 order-service 는 호스트 포트를 열지 않는다.
+  # 외부에서 직접 접근할 방법이 없고, 반드시 게이트웨이를 거쳐야 한다.
+  product-service:
+    build:
+      context: .
+      args:
+        SERVICE: product-service
+    depends_on:
+      # service_healthy: 컨테이너가 '시작'된 것이 아니라 '준비 완료'될 때까지 기다린다.
+      # 이게 없으면 Eureka 가 아직 포트를 열기 전에 등록을 시도해 실패 로그가 쌓인다.
+      discovery-server:
+        condition: service_healthy
+    environment:
+      EUREKA_SERVER_URL: http://discovery-server:8761/eureka
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+
+  order-service:
+    build:
+      context: .
+      args:
+        SERVICE: order-service
+    depends_on:
+      # service_healthy: 컨테이너가 '시작'된 것이 아니라 '준비 완료'될 때까지 기다린다.
+      # 이게 없으면 Eureka 가 아직 포트를 열기 전에 등록을 시도해 실패 로그가 쌓인다.
+      discovery-server:
+        condition: service_healthy
+    environment:
+      EUREKA_SERVER_URL: http://discovery-server:8761/eureka
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"

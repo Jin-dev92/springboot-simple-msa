@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -19,7 +20,10 @@ import org.springframework.test.web.servlet.MockMvc;
  * product-service 를 실제로 띄우지 않고 Feign 클라이언트만 가짜로 바꿔치기한다.
  * 검증 대상은 "다른 서비스에서 받아온 가격으로 총액을 계산해 저장하는가" 이다.
  */
-@SpringBootTest(properties = "eureka.client.enabled=false")
+@SpringBootTest(properties = {
+        "eureka.client.enabled=false",
+        "spring.kafka.admin.auto-create=false"
+})
 @AutoConfigureMockMvc
 class OrderControllerTest {
 
@@ -28,6 +32,10 @@ class OrderControllerTest {
 
     @MockitoBean
     private ProductClient productClient;
+
+    // 브로커가 없으므로 발행도 가짜로 바꾼다. 대신 "무엇을 발행했는지"는 검증한다.
+    @MockitoBean
+    private KafkaTemplate<String, Object> kafkaTemplate;
 
     @Test
     void 주문을_생성하면_상품_가격으로_총액을_계산한다() throws Exception {
@@ -42,6 +50,12 @@ class OrderControllerTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.productId").value(1))
                 .andExpect(jsonPath("$.totalPrice").value(267000));
+
+        org.mockito.Mockito.verify(kafkaTemplate).send(
+                org.mockito.ArgumentMatchers.eq(OrderCreatedEvent.TOPIC),
+                org.mockito.ArgumentMatchers.argThat(event ->
+                        event instanceof OrderCreatedEvent e
+                                && e.productId() == 1L && e.quantity() == 3));
     }
 
     @Test

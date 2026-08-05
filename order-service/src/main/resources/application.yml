@@ -11,6 +11,16 @@ spring:
   jpa:
     hibernate:
       ddl-auto: create-drop
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        # 메시지 헤더에 발신측 자바 클래스 이름을 박지 않는다.
+        # 박아 두면 수신측이 같은 패키지·같은 클래스를 갖도록 강요받아,
+        # 공통 모듈을 두지 않기로 한 이 프로젝트의 방침과 충돌한다.
+        spring.json.add.type.headers: false
 
 eureka:
   client:

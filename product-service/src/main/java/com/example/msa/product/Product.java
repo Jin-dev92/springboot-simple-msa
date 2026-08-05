@@ -30,6 +30,19 @@ public class Product {
         this.stock = stock;
     }
 
+    /**
+     * 재고를 차감한다. 남은 수량보다 많이 요청되면 차감하지 않고 false 를 돌려준다.
+     *
+     * @return 차감에 성공했으면 true
+     */
+    public boolean decreaseStock(int quantity) {
+        if (quantity > stock) {
+            return false;
+        }
+        stock -= quantity;
+        return true;
+    }
+
     public Long getId() {
         return id;
     }

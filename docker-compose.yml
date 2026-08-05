@@ -4,6 +4,29 @@
 # 몇 개가 떠 있는지를 다루는 것은 여전히 Eureka 의 몫이다.
 
 services:
+  # KRaft 모드로 동작하므로 ZooKeeper 컨테이너가 따로 필요 없다.
+  # 호스트 포트를 열지 않는다. 브로커는 내부 통신용이고, 확인은 docker compose exec 로 한다.
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # 브로커가 1대뿐이므로 내부 토픽 복제본도 1개로 낮춘다. (운영 기본값은 3)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
   discovery-server:
     build:
       context: .
@@ -48,10 +71,13 @@ services:
       # 이게 없으면 Eureka 가 아직 포트를 열기 전에 등록을 시도해 실패 로그가 쌓인다.
       discovery-server:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       EUREKA_SERVER_URL: http://discovery-server:8761/eureka
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
       EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
   order-service:
     build:
@@ -63,7 +89,10 @@ services:
       # 이게 없으면 Eureka 가 아직 포트를 열기 전에 등록을 시도해 실패 로그가 쌓인다.
       discovery-server:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       EUREKA_SERVER_URL: http://discovery-server:8761/eureka
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
       EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092

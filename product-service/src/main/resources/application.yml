@@ -19,6 +19,19 @@ spring:
   sql:
     init:
       mode: always
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: product-service
+      # earliest: 컨슈머 그룹이 처음 만들어질 때 토픽의 맨 처음부터 읽는다.
+      # 이 서비스가 꺼져 있는 동안 쌓인 이벤트를 놓치지 않기 위해 필요하다.
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        # 발신측이 클래스 정보를 헤더에 담지 않으므로, 어떤 타입으로 읽을지 여기서 정한다.
+        spring.json.value.default.type: com.example.msa.product.OrderCreatedEvent
+        spring.json.trusted.packages: com.example.msa.product
 
 eureka:
   client:

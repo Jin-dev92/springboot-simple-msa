@@ -17,6 +17,7 @@ MSA는 하나의 큰 애플리케이션(모놀리식)을 독립 배포 가능한
 | 서비스 간 HTTP 호출을 매번 손으로 짜야 하는가 | OpenFeign |
 | 서비스가 여러 개인데 어떻게 한 번에 띄우는가 | Docker Compose |
 | 같은 서비스를 여러 개 띄우면 요청은 누가 나누는가 | 클라이언트 사이드 로드밸런싱 |
+| 상대가 죽어 있어도 진행되어야 하는 일은 어떻게 하는가 | 비동기 이벤트 (Kafka) |
 
 ---
 
@@ -30,16 +31,23 @@ flowchart TB
     product["product-service<br/>H2 · 랜덤 포트"]
     eureka[("discovery-server<br/>Eureka · :8761")]
 
+    kafka[["Kafka<br/>topic: order-created"]]
+
     client -->|"HTTP :8080"| gateway
     gateway -->|"lb://order-service"| order
-    order -->|"OpenFeign"| product
+    order -->|"OpenFeign · 동기<br/>가격 조회"| product
+
+    order ==>|"발행 · 비동기<br/>OrderCreatedEvent"| kafka
+    kafka ==>|"구독 · 재고 차감"| product
 
     gateway -.->|"조회"| eureka
     order -.->|"등록 / heartbeat"| eureka
     product -.->|"등록 / heartbeat"| eureka
 ```
 
-실선은 실제 요청이 흐르는 경로, 점선은 Eureka와 주고받는 등록·조회 트래픽입니다.
+- 얇은 실선: 응답을 기다리는 **동기** 호출
+- 굵은 실선: 응답을 기다리지 않는 **비동기** 이벤트 (Phase 4에서 추가)
+- 점선: Eureka와 주고받는 등록·조회 트래픽
 
 ### 설계 원칙: 주소를 하드코딩하지 않는다
 
@@ -97,7 +105,7 @@ Order   { id, productId, quantity, totalPrice }   POST /orders
 | **1** | 멀티모듈 골격, Eureka, 서비스 2개, Gateway, Feign | Eureka 대시보드에 3개 등록 확인 + `POST /api/orders` 성공 | **완료** |
 | **2** | Dockerfile, Docker Compose | `docker compose up` 한 번으로 Phase 1과 동일한 결과 | **완료** |
 | **3** | product-service 인스턴스 2개로 스케일 아웃 | 두 인스턴스 로그에 요청이 번갈아 들어오는지 확인 | **완료** |
-| **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | product-service가 죽어도 주문은 성공하고, 복구 시 재고가 반영됨 | 예정 |
+| **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | 주문 응답 이후에 재고가 차감됨 + product-service가 죽어 있는 동안 발행된 이벤트가 복구 후 처리됨 | **완료** |
 | **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | Zipkin에서 gateway→order→product가 한 줄로 보임 + 장애 시 fallback 응답 | 예정 |
 
 Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이후는 필요할 때 이어서 진행합니다.
@@ -211,6 +219,80 @@ docker compose logs product-service | grep "상품 조회 요청" | sed 's/ *|.*
 
 > 인스턴스를 늘린 직후 몇십 초 동안은 새 인스턴스로 요청이 가지 않을 수 있습니다. Eureka 클라이언트가 레지스트리를 주기적으로만 갱신하고(Compose에서 5초로 설정), Spring Cloud LoadBalancer도 인스턴스 목록을 자체 캐시(기본 35초)에 두기 때문입니다. 스케일 아웃이 즉시 반영되지 않는다는 점 자체가 이 구조의 특성입니다.
 
+### Phase 4 — Kafka로 재고 차감을 비동기화
+
+Kafka는 `docker compose up`에 이미 포함되어 있으므로 실행 방법은 Phase 2와 같습니다.
+
+**한 번의 주문 생성 안에 성격이 다른 두 통신이 공존합니다.**
+
+| | 가격 조회 | 재고 차감 |
+|---|---|---|
+| 방식 | 동기 (OpenFeign) | 비동기 (Kafka) |
+| 이유 | 총액을 응답에 담아야 하므로 답을 기다려야 함 | 응답에 재고를 담을 필요가 없음 |
+| 대가 | product-service가 죽으면 주문도 실패 | 재고가 즉시 반영되지 않음 |
+
+같은 요청 안에서 둘을 나란히 놓고 비교하는 것이 이 단계의 목적입니다. 어느 한쪽이 우월한 것이 아니라, **응답에 그 답이 필요한가**로 갈립니다.
+
+**이벤트 이름이 `DecreaseStockCommand`가 아니라 `OrderCreatedEvent`인 이유**
+
+order-service는 "재고를 깎아라"라고 지시하지 않고 "주문이 생겼다"는 사실만 알립니다. 그 사실을 듣고 무엇을 할지는 듣는 쪽이 정합니다. 덕분에 나중에 알림 서비스나 통계 서비스가 같은 이벤트를 구독해도 order-service는 손댈 필요가 없습니다. 지시(command)로 이름 짓는 순간 보내는 쪽이 받는 쪽의 일을 알게 되어 결합이 생깁니다.
+
+**두 서비스가 합의한 것은 자바 클래스가 아니라 JSON 필드 이름입니다.** `OrderCreatedEvent` record가 order-service와 product-service에 각각 따로 선언되어 있습니다. 발행할 때 메시지 헤더에 자바 클래스 이름을 넣지 않도록(`spring.json.add.type.headers: false`) 설정했기 때문에, 수신측은 자기 패키지의 자기 클래스로 읽습니다. 서로 다른 언어로 짜여 있어도 통하는 구조입니다.
+
+#### 확인 절차
+
+**1) 결과적 일관성 — 주문 응답 직후에는 재고가 아직 그대로입니다**
+
+```bash
+curl -s http://localhost:8080/api/products/1
+# {"id":1,"name":"키보드","price":89000.00,"stock":30}
+
+curl -s -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -d '{"productId": 1, "quantity": 4}'
+# {"id":1,"productId":1,"quantity":4,"totalPrice":356000.00}
+
+curl -s http://localhost:8080/api/products/1   # 바로 조회하면
+# {"id":1,"name":"키보드","price":89000.00,"stock":30}   ← 아직 30
+
+curl -s http://localhost:8080/api/products/1   # 잠시 뒤 다시 조회하면
+# {"id":1,"name":"키보드","price":89000.00,"stock":26}   ← 26으로 반영
+```
+
+이 지연은 버그가 아니라 비동기를 선택한 대가입니다. "주문은 이미 성공했지만 재고는 아직"인 구간이 존재한다는 것을 받아들여야 합니다.
+
+**2) product-service가 죽어 있는 동안 발행된 이벤트는 유실되지 않습니다**
+
+```bash
+docker compose stop product-service
+
+# 동기 호출은 함께 죽는다
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -d '{"productId": 1, "quantity": 5}'
+# 500
+
+# 구독자가 없어도 브로커에는 쌓인다 (콘솔 프로듀서로 직접 발행)
+echo '{"orderId":999,"productId":1,"quantity":5}' | \
+  docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic order-created
+
+docker compose start product-service
+docker compose logs product-service | grep "재고 차감"
+```
+
+실제 결과는 다음과 같았습니다.
+
+```
+재고 차감: productId=1, 주문수량=4, 남은재고=26 (orderId=1)     ← 중지 전에 처리됨
+재고 차감: productId=1, 주문수량=5, 남은재고=25 (orderId=999)   ← 재기동 후 처리됨
+```
+
+여기서 두 가지를 더 읽을 수 있습니다.
+
+- **이미 처리한 `orderId=1` 이벤트는 재처리되지 않았습니다.** 컨슈머 그룹의 오프셋(어디까지 읽었는지)이 브로커에 커밋되어 있어, 재기동 시 그 다음부터 이어서 읽기 때문입니다. `auto-offset-reset: earliest`는 그룹이 **처음 만들어질 때**만 적용됩니다.
+- **남은 재고가 21이 아니라 25입니다.** product-service의 H2가 인메모리이므로 컨테이너를 재시작하면 초기 데이터(재고 30)로 돌아갔고, 거기서 5를 뺀 값이기 때문입니다. 이벤트는 브로커에 안전하게 남아 있었지만 **서비스가 들고 있던 상태는 사라졌다**는 뜻입니다. 메시지의 내구성과 서비스 상태의 내구성은 별개의 문제이며, 후자는 영속 DB(Phase 1에서 학습 속도를 위해 인메모리를 선택)의 몫입니다.
+
+**재고 부족 이벤트는 로그만 남기고 버립니다.** 예외를 던지면 Kafka가 같은 메시지를 무한 재시도하면서 뒤의 정상 이벤트까지 막습니다(poison message). 실제로 다루려면 DLQ(Dead Letter Queue)와 보상 트랜잭션이 필요한데, 이는 이 프로젝트의 범위를 넘어섭니다.
+
 ---
 
 ## 6. 기술 스택
@@ -223,7 +305,8 @@ docker compose logs product-service | grep "상품 조회 요청" | sed 's/ *|.*
 | 빌드 | Gradle 멀티모듈 (Groovy DSL) | 서브프로젝트 4개를 한 저장소에서 버전 통합 관리합니다 |
 | 서비스 디스커버리 | Netflix Eureka | 등록/해제 과정을 대시보드로 직접 볼 수 있어 학습에 유리합니다 |
 | 게이트웨이 | Spring Cloud Gateway | |
-| 서비스 간 통신 | OpenFeign | 인터페이스 선언만으로 HTTP 클라이언트가 생성되며, 서킷 브레이커를 붙이기 쉽습니다 |
+| 서비스 간 통신(동기) | OpenFeign | 인터페이스 선언만으로 HTTP 클라이언트가 생성되며, 서킷 브레이커를 붙이기 쉽습니다 |
+| 서비스 간 통신(비동기) | Apache Kafka 4.3 (KRaft) | KRaft 모드라 ZooKeeper 컨테이너가 따로 필요 없습니다 |
 | 저장소 | H2 (인메모리, 서비스별 분리) | 기동이 빠르고 Database per Service 원칙은 그대로 체감됩니다 |
 
 ---

@@ -10,8 +10,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.web.servlet.MockMvc;
 
-// eureka.client.enabled=false : 테스트는 레지스트리 없이 이 서비스만 단독으로 검증한다.
-@SpringBootTest(properties = "eureka.client.enabled=false")
+// 테스트는 레지스트리도 브로커도 없이 이 서비스만 단독으로 검증한다.
+@SpringBootTest(properties = {
+        "eureka.client.enabled=false",
+        "spring.kafka.listener.auto-startup=false",
+        "spring.kafka.admin.auto-create=false"
+})
 @AutoConfigureMockMvc
 class ProductControllerTest {
 

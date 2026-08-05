@@ -926,18 +926,90 @@ curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" | jq 
 
 재고는 `12 - 5 = 7`이고, **취소된 주문의 100은 차감되지 않았습니다.** 두 서비스가 같은 사실을 믿는 상태로 되돌아왔습니다.
 
-### 남은 문제 세 가지
+### 멱등성 — 같은 이벤트가 두 번 와도 견디기
+
+**Kafka는 at-least-once입니다.** 컨슈머가 메시지를 처리하고 오프셋을 커밋하기 직전에 죽거나, 컨슈머 그룹에 리밸런싱이 일어나면 같은 메시지가 다시 전달됩니다. "정확히 한 번"은 분산 시스템에서 매우 비싼 보장이라, 대개 **재전송을 허용하고 받는 쪽이 견디게** 만듭니다.
+
+문제는 모든 연산이 재실행에 안전하지는 않다는 점입니다.
+
+| 연산 | 두 번 실행하면 | 멱등한가 |
+|---|---|---|
+| 주문 상태를 CONFIRMED 로 설정 | 여전히 CONFIRMED | ✅ |
+| **재고를 5 만큼 차감** | **10 이 깎임** | ❌ |
+| 이메일 발송 | 두 통 발송 | ❌ |
+
+**누적되는 연산**과 **덮어쓰는 연산**의 차이입니다. order-service의 상태 변경은 덮어쓰기라 그냥 두어도 안전하지만, product-service의 재고 차감은 막아야 합니다.
+
+#### 처리 기록을 남긴다
+
+```mermaid
+flowchart TB
+    E["OrderCreatedEvent 도착"] --> C{"processed_order_events 에<br/>이 orderId 가 있는가?"}
+    C -->|"있음"| R["재고는 건드리지 않고<br/>저장된 결론을 그대로 재발행"]
+    C -->|"없음"| D["재고 차감 + 처리 기록 저장<br/>(같은 트랜잭션)"]
+    D --> P["결과 발행"]
+    R --> P
+```
+
+두 가지가 설계의 핵심입니다.
+
+**1) `orderId`를 기본키로 삼습니다.** 자동 증가 id를 두고 orderId를 일반 컬럼에 넣으면 중복 행이 들어갈 수 있습니다. 기본키로 두면 DB가 유일성을 보장합니다.
+
+**2) 중복이어도 결과를 다시 발행합니다.** 그냥 건너뛰면, 첫 처리에서 발행이 실패했을 경우 주문이 PENDING으로 영원히 남습니다. 그래서 처리 기록에 **결론까지 함께 저장**해 두고 재발행합니다.
+
+```java
+var seen = processedEvents.findById(event.orderId());
+if (seen.isPresent()) {
+    // 재고는 그대로, 결론만 다시 알린다
+    return new StockResultEvent(..., seen.get().isReserved(), seen.get().getReason());
+}
+```
+
+#### 재고 차감과 기록은 한 트랜잭션이어야 합니다
+
+따로 커밋하면 "재고는 깎였는데 기록은 없는" 상태가 생기고, 그러면 재전송 때 또 깎입니다. 둘 다 product-service의 같은 DB 안에 있으므로 `@Transactional`로 묶을 수 있습니다.
+
+> **함정: self-invocation.** `@Transactional`은 스프링이 만든 프록시를 거쳐야 동작합니다. 같은 클래스 안에서 자기 메서드를 호출하면 프록시를 지나지 않아 **트랜잭션이 조용히 걸리지 않습니다.** 에러도 나지 않아 알아채기 어렵습니다. 그래서 이 프로젝트는 트랜잭션 경계를 `StockReservationService`라는 별도 빈으로 옮겼습니다.
+
+#### 직접 확인
+
+같은 이벤트를 콘솔 프로듀서로 3번 발행합니다.
+
+```bash
+for i in 1 2 3; do
+  echo '{"orderId":777,"productId":1,"quantity":5}' | \
+    docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+    --bootstrap-server localhost:9092 --topic order-created
+done
+
+curl -s http://localhost:8080/api/products/1
+```
+
+실측 결과입니다. 재고 30에서 **5만 깎였습니다.**
+
+```
+{"id":1,"name":"키보드","price":89000.00,"stock":25}
+```
+
+로그를 보면 첫 번째만 차감하고 나머지는 기록을 보고 건너뛴 것이 드러납니다.
+
+```
+재고 차감: productId=1, 주문수량=5, 남은재고=25 (orderId=777)
+이미 처리한 주문. 재고는 건드리지 않고 결과만 재발행: orderId=777, 최초처리=...
+이미 처리한 주문. 재고는 건드리지 않고 결과만 재발행: orderId=777, 최초처리=...
+```
+
+### 아직 남은 문제 두 가지
 
 코드에 `ponytail:` 주석으로 표시해 두었습니다.
 
 ```mermaid
 flowchart LR
-    A["① 멱등성<br/>같은 이벤트 2번 →<br/>재고 2번 차감"] --> A2["처리한 orderId 기록"]
-    B["② dual write<br/>DB 저장 후 발행 전 죽으면<br/>PENDING 영구 잔류"] --> B2["Transactional Outbox"]
-    C["③ 타임아웃<br/>결과가 영영 안 오는<br/>PENDING 방치"] --> C2["일정 시간 뒤 자동 취소"]
+    B["dual write<br/>DB 커밋과 이벤트 발행이<br/>원자적이지 않다"] --> B2["Transactional Outbox<br/>이벤트를 같은 트랜잭션에<br/>테이블로 기록 후 별도 발행"]
+    C["타임아웃<br/>결과가 영영 안 오는<br/>PENDING 방치"] --> C2["일정 시간 뒤<br/>자동 취소하는 배치"]
 ```
 
-①이 왜 재고에서만 문제인지 짚어둘 만합니다. Kafka는 at-least-once라 같은 메시지가 두 번 올 수 있는데, 주문 상태를 CONFIRMED로 두 번 쓰는 것은 결과가 같습니다(멱등). 반면 **재고 차감처럼 누적되는 연산**은 두 번 실행되면 값이 달라집니다. 어떤 연산이 멱등인지 구분하는 것이 이벤트 기반 설계의 기본기입니다.
+dual write는 멱등성 처리로 **완화**되었습니다. 발행 직전에 죽더라도 재전송 때 같은 결론이 다시 나가기 때문입니다. 다만 재전송 자체가 없으면 여전히 PENDING으로 남으므로, 완전한 해결은 아닙니다.
 
 ---
 
@@ -1012,3 +1084,74 @@ sequenceDiagram
 > **MSA의 구성 요소는 대부분 "나누었기 때문에 생긴 문제"를 되돌리기 위해 존재합니다.**
 
 모놀리식에서 공짜였던 것(주소를 안다, 즉시 응답한다, 한 트랜잭션에 묶인다)을 되찾기 위해 Eureka와 Gateway와 Kafka와 Zipkin과 Resilience4j를 각각 도입했습니다. 나누는 데는 비용이 따르며, **그 비용을 감당할 만큼 독립 배포가 필요한가**가 MSA 도입의 실제 판단 기준입니다.
+
+---
+
+## 부록 A. 컨테이너로 묶을 때 부딪히는 것들
+
+서비스를 나누면 "어떻게 한 번에 띄우는가"가 새로운 문제가 됩니다. Docker Compose 로 옮기는 과정에서 실제로 부딪힌 셋을 남깁니다.
+
+### 1) `localhost` 가 자기 자신을 가리킨다
+
+컨테이너 안에서 `localhost` 는 호스트가 아니라 그 컨테이너 자신입니다. 로컬 실행 때 쓰던 `http://localhost:8761/eureka` 가 통하지 않습니다.
+
+```yaml
+defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
+```
+
+`${변수:기본값}` 형태로 두면 **로컬 실행은 그대로 동작하고**, Compose 에서는 환경변수로 덮어씁니다. 컨테이너끼리는 Compose 가 등록해 준 서비스 이름(`discovery-server`)을 DNS 로 쓸 수 있습니다.
+
+> DNS 로 찾을 수 있는 것은 '컨테이너'까지입니다. 인스턴스가 몇 개 살아 있는지, 어느 것이 건강한지를 다루는 것은 여전히 Eureka 의 몫입니다. 그래서 Compose 를 쓰면서도 디스커버리가 필요합니다.
+
+### 2) `depends_on` 은 "준비 완료"를 기다리지 않는다
+
+`depends_on` 만 쓰면 Compose 는 컨테이너가 **시작**된 것까지만 보장합니다. Eureka 가 아직 포트를 열기 전에 나머지가 등록을 시도하면 실패 스택트레이스가 쌓입니다. 재시도로 결국 복구되지만 약 30초가 걸리고, 그동안의 로그는 학습자가 "고장났다"고 오해하기 쉽습니다.
+
+```yaml
+healthcheck:
+  test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8761"]
+depends_on:
+  discovery-server:
+    condition: service_healthy
+```
+
+헬스체크는 `curl` 을 설치하는 대신 bash 의 `/dev/tcp` 로 포트만 확인합니다. 이미지에 추가로 설치할 것이 없습니다.
+
+```mermaid
+flowchart LR
+    A["depends_on 만"] --> A2["컨테이너 '시작'까지만 보장<br/>→ 등록 실패 로그 + 30초 지연"]
+    B["+ healthcheck<br/>condition: service_healthy"] --> B2["실제 '준비 완료'까지 대기<br/>→ 실패 로그 0건"]
+```
+
+### 3) 실행 가능한 jar 가 두 개 만들어진다
+
+Gradle 의 `java` 플러그인은 라이브러리용 `*-plain.jar` 를, Spring Boot 플러그인은 실행 가능한 `*.jar` 를 각각 만듭니다. Dockerfile 이 `COPY */build/libs/*.jar app.jar` 로 집으면 두 개가 잡혀 빌드가 실패합니다.
+
+```groovy
+tasks.named('jar') { enabled = false }
+```
+
+### Dockerfile 은 하나뿐입니다
+
+Spring Boot 실행 가능 jar 는 어느 서비스든 실행 방법이 같습니다. 그래서 이미지 정의를 5개 만들지 않고, 어떤 모듈을 담을지만 빌드 인자로 받습니다.
+
+```dockerfile
+ARG SERVICE
+COPY ${SERVICE}/build/libs/*.jar app.jar
+```
+
+Docker 안에서 Gradle 빌드를 하는 멀티스테이지 방식은 쓰지 않았습니다. 매번 의존성을 새로 받아 느려서 학습 루프에 맞지 않습니다. CI 를 붙일 때 도입하면 됩니다.
+
+### 포트를 여는 기준
+
+호스트 포트를 여는 것은 **외부에서 직접 불러야 하는 것**뿐입니다.
+
+| 컨테이너 | 호스트 포트 | 이유 |
+|---|---|---|
+| api-gateway | 8080 | 외부 진입점 |
+| discovery-server | 8761 | Eureka 대시보드를 브라우저로 보기 위해 |
+| zipkin | 9411 | 추적 UI 를 브라우저로 보기 위해 |
+| auth / order / product | 없음 | 게이트웨이를 거쳐야만 접근 가능하게 강제 |
+| kafka | 없음 | 내부 통신 전용. 확인은 `docker compose exec` 로 |
+
+**product-service 에 호스트 포트를 매핑하지 않은 것이 4절의 `--scale` 을 가능하게 합니다.** 포트를 고정했다면 두 번째 컨테이너가 같은 포트를 잡지 못해 실패합니다.

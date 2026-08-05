@@ -2,6 +2,7 @@ package com.example.msa.product;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import org.junit.jupiter.api.Test;
@@ -71,5 +72,48 @@ class OrderCreatedListenerTest {
         assertThat(result.reserved()).isFalse();
         // 조용히 버리면 주문이 PENDING 으로 영원히 남는다. 반드시 결과를 보내야 한다.
         assertThat(result.orderId()).isEqualTo(3L);
+    }
+
+    @Test
+    void 같은_이벤트가_두_번_와도_재고는_한_번만_차감된다() {
+        int before = repository.findById(1L).orElseThrow().getStock();
+        OrderCreatedEvent event = new OrderCreatedEvent(10L, 1L, 4);
+
+        listener.handle(event);
+        listener.handle(event);   // Kafka 는 at-least-once 라 재전송이 있을 수 있다
+
+        assertThat(repository.findById(1L).orElseThrow().getStock()).isEqualTo(before - 4);
+    }
+
+    @Test
+    void 중복_이벤트에도_같은_결과를_다시_발행한다() {
+        OrderCreatedEvent event = new OrderCreatedEvent(11L, 1L, 2);
+
+        listener.handle(event);
+        listener.handle(event);
+
+        // 두 번 발행되어야 한다. 첫 처리에서 발행이 실패했을 수 있으므로
+        // 조용히 건너뛰면 주문이 PENDING 으로 영원히 남는다.
+        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+        verify(kafkaTemplate, times(2)).send(eq(StockResultEvent.TOPIC), captor.capture());
+
+        assertThat(captor.getAllValues())
+                .allSatisfy(v -> assertThat(((StockResultEvent) v).reserved()).isTrue());
+    }
+
+    @Test
+    void 재고_부족_결론도_중복_시_그대로_유지된다() {
+        int stock = repository.findById(3L).orElseThrow().getStock();
+        OrderCreatedEvent event = new OrderCreatedEvent(12L, 3L, stock + 1);
+
+        listener.handle(event);
+        listener.handle(event);
+
+        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+        verify(kafkaTemplate, times(2)).send(eq(StockResultEvent.TOPIC), captor.capture());
+
+        assertThat(captor.getAllValues())
+                .allSatisfy(v -> assertThat(((StockResultEvent) v).reserved()).isFalse());
+        assertThat(repository.findById(3L).orElseThrow().getStock()).isEqualTo(stock);
     }
 }

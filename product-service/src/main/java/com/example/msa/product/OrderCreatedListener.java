@@ -1,13 +1,11 @@
 package com.example.msa.product;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * 주문 생성 이벤트를 듣고 재고를 차감한 뒤, <b>그 결과를 반드시 되돌려 보낸다</b>.
+ * 주문 생성 이벤트를 받아 재고 확보를 맡기고, <b>그 결과를 반드시 되돌려 보낸다</b>.
  *
  * <p>Phase 4 에서는 재고가 부족하면 로그만 남기고 이벤트를 버렸다. 그 결과 주문은
  * "성공"으로 남고 재고는 그대로인, 서로 어긋난 상태가 되었다. 서비스마다 DB 가
@@ -20,47 +18,25 @@ import org.springframework.stereotype.Component;
 @Component
 class OrderCreatedListener {
 
-    private static final Logger log = LoggerFactory.getLogger(OrderCreatedListener.class);
-
-    private final ProductRepository repository;
+    private final StockReservationService reservationService;
     private final KafkaTemplate<String, Object> kafkaTemplate;
 
-    OrderCreatedListener(ProductRepository repository, KafkaTemplate<String, Object> kafkaTemplate) {
-        this.repository = repository;
+    OrderCreatedListener(StockReservationService reservationService,
+            KafkaTemplate<String, Object> kafkaTemplate) {
+        this.reservationService = reservationService;
         this.kafkaTemplate = kafkaTemplate;
     }
 
-    // ponytail: 같은 이벤트가 두 번 오면 재고가 두 번 깎인다. Kafka 는 at-least-once 라
-    // 재전송이 일어날 수 있다. 실제로 다루려면 처리한 orderId 를 기록해 두고 건너뛰어야
-    // 한다(멱등 소비). 주문 상태 변경 쪽은 같은 값을 두 번 써도 결과가 같아 문제없다.
     @KafkaListener(topics = OrderCreatedEvent.TOPIC, groupId = "product-service")
     void handle(OrderCreatedEvent event) {
-        StockResultEvent result = repository.findById(event.productId())
-                .map(product -> reserve(product, event))
-                .orElseGet(() -> {
-                    log.warn("존재하지 않는 상품에 대한 주문 이벤트: productId={}", event.productId());
-                    return StockResultEvent.rejected(event.orderId(), event.productId(),
-                            event.quantity(), "존재하지 않는 상품입니다");
-                });
+        StockResultEvent result = reservationService.reserve(event);
 
-        // ponytail: DB 저장과 이벤트 발행이 한 트랜잭션이 아니다(dual write).
-        // 저장 직후 이 서비스가 죽으면 재고는 깎였는데 결과가 발행되지 않아
-        // 주문이 PENDING 으로 남는다. 실무에서는 Transactional Outbox 패턴으로
-        // 이벤트를 같은 DB 트랜잭션에 기록한 뒤 별도 프로세스가 발행한다.
+        // 발행은 트랜잭션 밖에서 한다. 브로커 전송이 느리거나 실패할 때
+        // DB 커넥션과 락을 붙잡고 있지 않기 위해서다.
+        //
+        // ponytail: 그래서 DB 커밋과 발행이 여전히 원자적이지 않다(dual write).
+        // 다만 처리 기록을 남겨 두었으므로, 발행 직전에 죽더라도 재전송 때
+        // 같은 결론이 다시 나간다. 완전한 해결은 Transactional Outbox 패턴이다.
         kafkaTemplate.send(StockResultEvent.TOPIC, result);
-    }
-
-    private StockResultEvent reserve(Product product, OrderCreatedEvent event) {
-        if (!product.decreaseStock(event.quantity())) {
-            log.warn("재고 부족: productId={}, 주문수량={}, 현재재고={} (orderId={})",
-                    event.productId(), event.quantity(), product.getStock(), event.orderId());
-            return StockResultEvent.rejected(event.orderId(), event.productId(), event.quantity(),
-                    "재고 부족 (요청 %d, 남은 재고 %d)".formatted(event.quantity(), product.getStock()));
-        }
-
-        repository.save(product);
-        log.info("재고 차감: productId={}, 주문수량={}, 남은재고={} (orderId={})",
-                event.productId(), event.quantity(), product.getStock(), event.orderId());
-        return StockResultEvent.reserved(event.orderId(), event.productId(), event.quantity());
     }
 }

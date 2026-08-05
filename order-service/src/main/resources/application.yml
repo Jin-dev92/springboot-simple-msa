@@ -21,6 +21,23 @@ spring:
         # 박아 두면 수신측이 같은 패키지·같은 클래스를 갖도록 강요받아,
         # 공통 모듈을 두지 않기로 한 이 프로젝트의 방침과 충돌한다.
         spring.json.add.type.headers: false
+    template:
+      # 메시지 헤더에 추적 정보를 실어 보낸다. 이걸 켜야 Zipkin 에서
+      # HTTP 요청과 그로 인해 발행된 Kafka 이벤트가 하나의 trace 로 묶인다.
+      observation-enabled: true
+
+  cloud:
+    openfeign:
+      circuitbreaker:
+        # @FeignClient 의 fallbackFactory 를 실제로 동작시키려면 이 스위치가 필요하다.
+        enabled: true
+      client:
+        config:
+          default:
+            # 타임아웃을 짧게 잡는다. 이 값이 길면 상대가 응답 없이 매달려 있을 때
+            # 우리 서비스의 스레드가 그만큼 묶여 함께 느려진다.
+            connectTimeout: 2000
+            readTimeout: 2000
 
 eureka:
   client:
@@ -30,3 +47,13 @@ eureka:
       defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
   instance:
     instance-id: ${spring.application.name}:${random.uuid}
+
+management:
+  tracing:
+    sampling:
+      # 요청의 몇 %를 추적할지. 학습용이라 전부(1.0) 남긴다.
+      # 운영에서는 부하와 저장 비용 때문에 0.1 이하로 두는 경우가 많다.
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}

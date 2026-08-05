@@ -22,6 +22,7 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
+        "management.tracing.enabled=false",
         "spring.kafka.admin.auto-create=false"
 })
 @AutoConfigureMockMvc

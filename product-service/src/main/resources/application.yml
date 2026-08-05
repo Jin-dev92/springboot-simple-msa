@@ -32,6 +32,9 @@ spring:
         # 발신측이 클래스 정보를 헤더에 담지 않으므로, 어떤 타입으로 읽을지 여기서 정한다.
         spring.json.value.default.type: com.example.msa.product.OrderCreatedEvent
         spring.json.trusted.packages: com.example.msa.product
+    listener:
+      # 발신측이 실어 보낸 추적 정보를 이어받는다.
+      observation-enabled: true
 
 eureka:
   client:
@@ -43,3 +46,13 @@ eureka:
     # 포트가 매번 달라지므로, 인스턴스를 구분할 고유 ID 를 직접 만들어 준다.
     # (Phase 3 에서 같은 서비스를 여러 개 띄울 때 필요하다.)
     instance-id: ${spring.application.name}:${random.uuid}
+
+management:
+  tracing:
+    sampling:
+      # 요청의 몇 %를 추적할지. 학습용이라 전부(1.0) 남긴다.
+      # 운영에서는 부하와 저장 비용 때문에 0.1 이하로 두는 경우가 많다.
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}

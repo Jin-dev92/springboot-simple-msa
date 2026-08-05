@@ -32,3 +32,13 @@ eureka:
       # 컨테이너 안에서 localhost 는 자기 자신이므로, Docker 로 띄울 때는
       # EUREKA_SERVER_URL 환경변수로 discovery-server 를 가리키게 덮어쓴다.
       defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
+
+management:
+  tracing:
+    sampling:
+      # 요청의 몇 %를 추적할지. 학습용이라 전부(1.0) 남긴다.
+      # 운영에서는 부하와 저장 비용 때문에 0.1 이하로 두는 경우가 많다.
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}

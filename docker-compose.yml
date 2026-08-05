@@ -27,6 +27,13 @@ services:
       timeout: 10s
       retries: 30
 
+  # 각 서비스가 보낸 span 을 모아 하나의 요청 흐름으로 보여 준다.
+  # 저장소를 지정하지 않으면 메모리에 담으므로, 재시작하면 추적 기록도 사라진다.
+  zipkin:
+    image: openzipkin/zipkin:3.6.1
+    ports:
+      - "9411:9411"
+
   discovery-server:
     build:
       context: .
@@ -58,6 +65,7 @@ services:
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
       # 레지스트리를 얼마나 자주 갱신할지. 기본값 30초는 학습 중 기다리기 답답해서 줄였다.
       EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+      ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
 
   # product-service 와 order-service 는 호스트 포트를 열지 않는다.
   # 외부에서 직접 접근할 방법이 없고, 반드시 게이트웨이를 거쳐야 한다.
@@ -77,6 +85,7 @@ services:
       EUREKA_SERVER_URL: http://discovery-server:8761/eureka
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
       EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+      ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
   order-service:
@@ -95,4 +104,5 @@ services:
       EUREKA_SERVER_URL: http://discovery-server:8761/eureka
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
       EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+      ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092

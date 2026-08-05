@@ -13,6 +13,7 @@ import org.springframework.test.web.servlet.MockMvc;
 // 테스트는 레지스트리도 브로커도 없이 이 서비스만 단독으로 검증한다.
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
+        "management.tracing.enabled=false",
         "spring.kafka.listener.auto-startup=false",
         "spring.kafka.admin.auto-create=false"
 })

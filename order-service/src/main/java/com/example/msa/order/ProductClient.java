@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.PathVariable;
  * Eureka 에 등록된 서비스 이름이며, 실제 주소는 호출 시점에 레지스트리에서 조회해 채워진다.
  * 인스턴스가 여러 개면 그 중 하나를 골라 주는 로드밸런싱도 여기서 일어난다.
  */
-@FeignClient(name = "product-service")
+@FeignClient(name = "product-service", fallbackFactory = ProductClientFallback.class)
 public interface ProductClient {
 
     @GetMapping("/products/{id}")

@@ -9,7 +9,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.cloud.gateway.route.Route;
 import org.springframework.cloud.gateway.route.RouteLocator;
 
-@SpringBootTest(properties = "eureka.client.enabled=false")
+@SpringBootTest(properties = {
+        "eureka.client.enabled=false",
+        "management.tracing.enabled=false"
+})
 class ApiGatewayApplicationTests {
 
     @Autowired

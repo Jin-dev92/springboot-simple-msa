@@ -3,4 +3,8 @@ dependencies {
     // (구 spring-cloud-starter-gateway = WebFlux 기반 서버)
     implementation 'org.springframework.cloud:spring-cloud-starter-gateway-server-webflux'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
+    // 분산 추적: 요청이 서비스 경계를 넘어갈 때 trace id 를 이어 붙여 Zipkin 으로 보낸다.
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-tracing-bridge-brave'
+    implementation 'io.zipkin.reporter2:zipkin-reporter-brave'
 }

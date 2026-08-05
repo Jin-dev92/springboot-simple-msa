@@ -18,6 +18,8 @@ MSA는 하나의 큰 애플리케이션(모놀리식)을 독립 배포 가능한
 | 서비스가 여러 개인데 어떻게 한 번에 띄우는가 | Docker Compose |
 | 같은 서비스를 여러 개 띄우면 요청은 누가 나누는가 | 클라이언트 사이드 로드밸런싱 |
 | 상대가 죽어 있어도 진행되어야 하는 일은 어떻게 하는가 | 비동기 이벤트 (Kafka) |
+| 여러 서비스를 거친 요청 하나를 어떻게 추적하는가 | 분산 추적 (Micrometer + Zipkin) |
+| 죽은 상대를 계속 두드려 나까지 느려지는 것을 어떻게 막는가 | 서킷 브레이커 (Resilience4j) |
 
 ---
 
@@ -106,7 +108,7 @@ Order   { id, productId, quantity, totalPrice }   POST /orders
 | **2** | Dockerfile, Docker Compose | `docker compose up` 한 번으로 Phase 1과 동일한 결과 | **완료** |
 | **3** | product-service 인스턴스 2개로 스케일 아웃 | 두 인스턴스 로그에 요청이 번갈아 들어오는지 확인 | **완료** |
 | **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | 주문 응답 이후에 재고가 차감됨 + product-service가 죽어 있는 동안 발행된 이벤트가 복구 후 처리됨 | **완료** |
-| **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | Zipkin에서 gateway→order→product가 한 줄로 보임 + 장애 시 fallback 응답 | 예정 |
+| **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | Zipkin에서 gateway→order→product가 한 줄로 보임 + 장애 시 즉시 실패 | **완료** |
 
 Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이후는 필요할 때 이어서 진행합니다.
 
@@ -132,7 +134,16 @@ Phase 1~2가 "MSA 인프라 이해"의 대부분을 차지합니다. Phase 3 이
 
 등록 확인은 브라우저에서 http://localhost:8761 을 열어 인스턴스 3개(`API-GATEWAY`, `ORDER-SERVICE`, `PRODUCT-SERVICE`)가 보이는지로 합니다.
 
-> 기동 직후에는 호출이 실패할 수 있습니다. Eureka 클라이언트는 기본적으로 30초 주기로 레지스트리를 갱신하므로, 서비스가 떠 있어도 게이트웨이가 그 사실을 알기까지 시간이 걸립니다. 1분 정도 기다린 뒤 다시 시도하면 됩니다.
+> **기동 직후 첫 요청은 실패할 수 있습니다.** Eureka 클라이언트는 기본적으로 30초 주기로 레지스트리를 갱신하므로, 서비스가 떠 있어도 호출하는 쪽이 그 사실을 알기까지 시간이 걸립니다. 1분 정도 기다린 뒤 다시 시도하면 됩니다.
+>
+> 이때 order-service 로그에 다음이 찍힙니다.
+>
+> ```
+> No servers available for service: product-service
+> RetryableFeignBlockingLoadBalancerClient : Service instance was not resolved, executing the original request
+> ```
+>
+> 인스턴스를 못 찾았을 때 Feign은 깔끔하게 실패하지 않고 **서비스 이름을 그대로 호스트명으로 삼아**(`http://product-service/`, 즉 80번 포트) 요청을 보냅니다. 그래서 최종 에러가 `Connection refused`로 나타나 원인을 오해하기 쉽습니다. 앞의 두 줄까지 함께 봐야 진짜 원인이 보입니다.
 
 동작 확인:
 
@@ -293,6 +304,95 @@ docker compose logs product-service | grep "재고 차감"
 
 **재고 부족 이벤트는 로그만 남기고 버립니다.** 예외를 던지면 Kafka가 같은 메시지를 무한 재시도하면서 뒤의 정상 이벤트까지 막습니다(poison message). 실제로 다루려면 DLQ(Dead Letter Queue)와 보상 트랜잭션이 필요한데, 이는 이 프로젝트의 범위를 넘어섭니다.
 
+### Phase 5-1 — Zipkin으로 요청 흐름 추적하기
+
+Zipkin도 `docker compose up`에 포함되어 있습니다. 브라우저에서 http://localhost:9411 을 엽니다.
+
+**서비스를 나누면 요청 하나가 어디서 느려졌는지 알 수 없게 됩니다.** 모놀리식에서는 스택 트레이스 하나로 끝나던 것이, 이제는 게이트웨이 로그와 order 로그와 product 로그를 각각 열어 시각을 대조해야 합니다. 분산 추적은 요청 하나에 **trace id**를 붙이고 그것을 서비스 경계 너머로 전파해, 흩어진 기록을 하나로 다시 꿰맵니다.
+
+추가한 것은 라이브러리 셋과 설정 한 덩어리입니다.
+
+| 추가 | 역할 |
+|---|---|
+| `spring-boot-starter-actuator` | 관측(Observation) 기반 설정을 켠다 |
+| `micrometer-tracing-bridge-brave` | trace id를 만들고 전파한다 |
+| `zipkin-reporter-brave` | 만들어진 span을 Zipkin으로 보낸다 |
+| `feign-micrometer` (order만) | **Feign 호출에 추적 헤더를 싣는다** |
+| `spring.kafka.*.observation-enabled` | **Kafka 메시지 헤더에 추적 정보를 싣는다** |
+
+굵게 표시한 둘이 핵심입니다. 이것이 없으면 각 서비스가 자기 몫의 span은 남기지만 **서로 연결되지 않아** 별개의 요청으로 보입니다. 추적은 "기록을 남기는 일"이 아니라 "경계 너머로 id를 전달하는 일"입니다.
+
+실제로 수집된 trace는 다음과 같습니다.
+
+```
+[api-gateway]        SERVER    http post                      41.9ms
+  [api-gateway]      CLIENT    http post                      34.8ms
+    [order-service]  SERVER    http post /orders              31.0ms
+      [order-service]          circuit-breaker                15.4ms
+        [order-service] CLIENT http get                       13.4ms
+          [product-service] SERVER http get /products/{id}     5.7ms
+      [order-service] PRODUCER order-created send             13.4ms
+        [product-service] CONSUMER order-created receive       4.5ms
+```
+
+**Kafka를 건너간 구간까지 같은 trace에 들어옵니다.** 비동기 이벤트는 응답을 기다리지 않으므로 호출 스택으로는 절대 이어지지 않는데, 메시지 헤더에 실린 trace id 덕분에 인과 관계가 보존됩니다.
+
+로그에도 trace id가 함께 찍히므로, Zipkin에서 느린 요청을 찾은 뒤 그 id로 각 서비스 로그를 검색하는 흐름이 가능해집니다.
+
+```
+2026-08-05T07:23:01.581Z WARN [order-service] [o-auto-1-exec-1] [6a72e4d5...-8c77ff1a...] ...
+                                                                 └ trace id ─┘ └ span id ┘
+```
+
+> 샘플링 비율을 `1.0`(100%)으로 두었습니다. 학습용이라 모든 요청을 남기지만, 운영에서는 부하와 저장 비용 때문에 보통 0.1 이하로 낮춥니다.
+
+### Phase 5-2 — 서킷 브레이커로 빠르게 실패하기
+
+Phase 4에서 확인했듯, product-service가 죽으면 주문도 500으로 함께 실패했습니다. 문제는 실패한다는 사실이 아니라 **느리게 실패한다**는 점입니다. 타임아웃이 날 때까지 order-service의 스레드가 묶여 있고, 그 사이 들어온 다른 요청까지 밀립니다. 상대 하나가 죽었을 뿐인데 우리까지 같이 죽는 구조입니다.
+
+서킷 브레이커는 두꺼비집과 같습니다. 실패가 일정 비율을 넘으면 회로를 열어(OPEN) **호출을 시도조차 하지 않고** 즉시 실패시킵니다.
+
+```java
+.slidingWindowSize(5)              // 최근 5건으로 실패율 계산
+.minimumNumberOfCalls(3)           // 최소 3건은 모여야 판단
+.failureRateThreshold(50.0f)       // 실패율 50% 초과 시 OPEN
+.waitDurationInOpenState(10초)      // 10초 뒤 HALF_OPEN 으로 전환해 재시도
+```
+
+#### 측정 결과
+
+```bash
+docker compose stop product-service
+# 주문을 연달아 시도하며 소요 시간 측정
+```
+
+| 시점 | 응답 | 소요 시간 | fallback이 받은 실패 원인 |
+|---|---|---|---|
+| 정상 | 201 | 0.53s | — |
+| 중지 직후 (회로 CLOSED) | 503 | **2.03s** | `TimeoutException` — 실제로 시도했다가 타임아웃 |
+| 회로 OPEN 이후 | 503 | **0.015s** | `CallNotPermittedException` — 시도조차 하지 않음 |
+
+**약 135배 빨라졌습니다.** 응답 코드는 똑같이 실패지만, 스레드를 2초씩 붙잡아 두지 않는다는 것이 차이입니다.
+
+fallback이 받은 실패 원인이 바뀌는 지점을 로그에서 그대로 볼 수 있습니다.
+
+```
+주문 거절. 원인: java.util.concurrent.TimeoutException: TimeLimiter ... recorded a timeout exception.
+주문 거절. 원인: io.github.resilience4j.circuitbreaker.CallNotPermittedException: CircuitBreaker ... is OPEN and does not permit further calls
+```
+
+product-service를 다시 띄우면 10초 뒤 HALF_OPEN으로 전환해 시험 호출을 보내고, 성공하면 회로가 닫혀 정상으로 돌아옵니다.
+
+#### fallback이 가짜 가격을 만들지 않는 이유
+
+**모든 호출에 의미 있는 대체값이 있는 것은 아닙니다.** "추천 상품 목록"이라면 빈 목록을 돌려주고 화면을 그리는 편이 낫습니다. 하지만 여기서 필요한 것은 **가격**이고, 가격은 지어낼 수 없습니다. 0원으로 주문을 받으면 잘못된 데이터가 DB에 영구히 남습니다.
+
+그래서 이 프로젝트의 fallback은 대체값을 만들지 않고 503으로 명확히 거절합니다. **서킷 브레이커의 가치는 "그럴듯한 가짜 응답"이 아니라 "빠르고 정직한 실패"에 있습니다.**
+
+#### 함정: 타임아웃이 두 겹입니다
+
+Feign 자체의 `connectTimeout`/`readTimeout`과 별개로, Spring Cloud CircuitBreaker가 `TimeLimiter`를 한 겹 더 씌웁니다. **그 기본값이 1초**여서, 명시하지 않으면 Feign에 설정한 2초가 아무 의미 없이 무시됩니다. 처음 측정했을 때 알 수 없는 1.03초가 나온 원인이 이것이었습니다. 이 프로젝트에서는 두 값을 2초로 맞춰 두었습니다.
+
 ---
 
 ## 6. 기술 스택
@@ -307,6 +407,8 @@ docker compose logs product-service | grep "재고 차감"
 | 게이트웨이 | Spring Cloud Gateway | |
 | 서비스 간 통신(동기) | OpenFeign | 인터페이스 선언만으로 HTTP 클라이언트가 생성되며, 서킷 브레이커를 붙이기 쉽습니다 |
 | 서비스 간 통신(비동기) | Apache Kafka 4.3 (KRaft) | KRaft 모드라 ZooKeeper 컨테이너가 따로 필요 없습니다 |
+| 분산 추적 | Micrometer Tracing + Zipkin 3.6 | Spring Boot 3의 기본 추적 스택이며, 별도 에이전트 없이 라이브러리만으로 동작합니다 |
+| 서킷 브레이커 | Resilience4j | Spring Cloud CircuitBreaker의 기본 구현이고 Feign에 선언만으로 붙습니다 |
 | 저장소 | H2 (인메모리, 서비스별 분리) | 기동이 빠르고 Database per Service 원칙은 그대로 체감됩니다 |
 
 ---

@@ -96,7 +96,7 @@ Order   { id, productId, quantity, totalPrice }   POST /orders
 |---|---|---|---|
 | **1** | 멀티모듈 골격, Eureka, 서비스 2개, Gateway, Feign | Eureka 대시보드에 3개 등록 확인 + `POST /api/orders` 성공 | **완료** |
 | **2** | Dockerfile, Docker Compose | `docker compose up` 한 번으로 Phase 1과 동일한 결과 | **완료** |
-| **3** | product-service 인스턴스 2개로 스케일 아웃 | 두 인스턴스 로그에 요청이 번갈아 들어오는지 확인 | 예정 |
+| **3** | product-service 인스턴스 2개로 스케일 아웃 | 두 인스턴스 로그에 요청이 번갈아 들어오는지 확인 | **완료** |
 | **4** | Kafka 기반 비동기 이벤트 (주문 생성 → 재고 차감) | product-service가 죽어도 주문은 성공하고, 복구 시 재고가 반영됨 | 예정 |
 | **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | Zipkin에서 gateway→order→product가 한 줄로 보임 + 장애 시 fallback 응답 | 예정 |
 
@@ -177,6 +177,39 @@ Gradle의 `java` 플러그인은 라이브러리용 `*-plain.jar`를, Spring Boo
 **Dockerfile은 하나만 둡니다.** Spring Boot 실행 가능 jar는 어느 서비스든 실행 방법이 같기 때문입니다. 어떤 모듈을 담을지는 Compose가 `SERVICE` 빌드 인자로 전달합니다.
 
 **포트는 게이트웨이(8080)와 Eureka(8761)만 엽니다.** product-service와 order-service는 호스트 포트를 열지 않으므로 외부에서 직접 접근할 방법이 없고, 반드시 게이트웨이를 거쳐야 합니다.
+
+### Phase 3 — 인스턴스를 늘려 부하 분산 확인하기
+
+```bash
+docker compose up -d --build --scale product-service=2
+```
+
+**코드 변경은 로그 한 줄뿐입니다.** 부하 분산은 이미 Phase 1에서 완성되어 있었습니다. `lb://product-service`와 `@FeignClient(name = "product-service")`는 처음부터 "이 이름으로 등록된 인스턴스들 중 하나를 골라라"라는 뜻이었고, 그동안 후보가 하나뿐이었을 뿐입니다.
+
+이 옵션이 그냥 통하는 이유는 **product-service에 호스트 포트를 매핑하지 않았기 때문**입니다. 호스트 포트를 고정해 두면 두 번째 컨테이너가 같은 포트를 잡지 못해 스케일이 실패합니다. 서비스 포트를 `0`으로 둔 선택이 여기서 값을 합니다.
+
+확인:
+
+```bash
+# Eureka 에 인스턴스가 2개 등록됐는지
+curl -s -H 'Accept: application/json' \
+  http://localhost:8761/eureka/apps/PRODUCT-SERVICE | grep -o '"instanceId":"[^"]*"'
+
+# 여러 번 호출한 뒤 인스턴스별 처리 건수 세기
+for i in $(seq 1 10); do curl -s -o /dev/null http://localhost:8080/api/products/1; done
+docker compose logs product-service | grep "상품 조회 요청" | sed 's/ *|.*//' | sort | uniq -c
+```
+
+실제 측정 결과는 다음과 같았습니다(총 17회 = 게이트웨이 직접 호출 10 + order-service의 Feign 호출 6 + 최초 확인 1).
+
+```
+   8 product-service-1
+   9 product-service-2
+```
+
+게이트웨이 경로와 Feign 경로가 **각각 따로** 부하를 나눕니다. 중앙에 로드밸런서 장비가 있는 것이 아니라, 호출하는 쪽이 인스턴스 목록을 받아 스스로 고르기 때문입니다. 이를 클라이언트 사이드 로드밸런싱이라고 합니다.
+
+> 인스턴스를 늘린 직후 몇십 초 동안은 새 인스턴스로 요청이 가지 않을 수 있습니다. Eureka 클라이언트가 레지스트리를 주기적으로만 갱신하고(Compose에서 5초로 설정), Spring Cloud LoadBalancer도 인스턴스 목록을 자체 캐시(기본 35초)에 두기 때문입니다. 스케일 아웃이 즉시 반영되지 않는다는 점 자체가 이 구조의 특성입니다.
 
 ---
 

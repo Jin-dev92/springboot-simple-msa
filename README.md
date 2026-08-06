@@ -177,6 +177,39 @@ docker compose ps --format '{{.Name}}\t{{.ID}}' | grep product
 # springboot-simple-msa-product-service-2	e11bf3383a34
 ```
 
+### 부하 테스트 (Gatling)
+
+시나리오는 `load-test/src/gatling/java` 에 자바 코드로 있습니다. XML 이 아니라 코드라 Git 에 남고 리뷰됩니다.
+
+```bash
+docker compose up -d --build --scale product-service=2
+./gradlew :load-test:gatlingRun
+```
+
+10초 램프업으로 50명까지 올린 뒤 20초간 초당 30건을 유지합니다. 실측 결과입니다.
+
+```
+> request count                    650  (KO 0)
+> mean response time (ms)           10
+> response time 95th percentile     19
+> response time 99th percentile     31
+> mean throughput (rps)          21.67
+
+=== 인스턴스별 처리 건수 (총 650건) ===
+  526ad169bfd6-7c7264   325  (50.0%)
+  5058505857ac-4a9acc   325  (50.0%)
+```
+
+**Gatling 은 어느 인스턴스가 응답했는지 모릅니다.** 그래서 시뮬레이션이 `X-Instance-Id` 헤더를 직접 받아 셉니다. 이 조합 덕분에 처리량·지연과 분배를 한 번에 볼 수 있습니다.
+
+HTML 리포트(백분위 그래프, 시간대별 응답 분포)는 실행 후 출력되는 경로에서 열 수 있습니다.
+
+```
+load-test/build/reports/gatling/productbrowsesimulation-<timestamp>/index.html
+```
+
+`-DbaseUrl=...` 으로 대상 주소를 바꿀 수 있습니다.
+
 ### 장애 상황 만들어 보기
 
 ```bash
@@ -249,6 +282,7 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | 분산 추적 | Micrometer Tracing + Zipkin 3.6 | Spring Boot 3의 기본 추적 스택이며 별도 에이전트가 필요 없습니다 |
 | 서킷 브레이커 | Resilience4j | Spring Cloud CircuitBreaker의 기본 구현이고 Feign에 선언만으로 붙습니다 |
 | 인증 | Spring Security + JWT (HS256) | `jjwt` 등 외부 라이브러리 없이 표준 스택으로 발급·검증합니다 |
+| 부하 테스트 | Gatling 3.15 (Java DSL) | 시나리오를 자바 코드로 관리해 Git 리뷰와 CI 실행이 가능합니다 |
 | 저장소 | H2 (인메모리, 서비스별 분리) | 기동이 빠르고 Database per Service 원칙은 그대로 체감됩니다 |
 
 > **버전 주의**: Spring Cloud 2025.0.0부터 게이트웨이 의존성이 `spring-cloud-starter-gateway-server-webflux`로, 설정 키가 `spring.cloud.gateway.server.webflux.*`로 바뀌었습니다. 검색되는 자료 대부분이 옛 이름 기준입니다.

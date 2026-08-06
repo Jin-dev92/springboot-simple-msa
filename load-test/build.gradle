@@ -1,0 +1,11 @@
+plugins {
+    // 시나리오를 src/gatling/java 에서 찾아 `./gradlew :load-test:gatlingRun` 으로 실행한다.
+    id 'io.gatling.gradle' version '3.15.1.2'
+}
+
+// 루트 build.gradle 이 모든 서브프로젝트에 Spring Boot 플러그인을 적용하는데,
+// 이 모듈은 실행 가능한 애플리케이션이 아니라 시나리오 모음이다.
+// bootJar 는 main 클래스를 요구하므로 꺼 둔다.
+tasks.named('bootJar') {
+    enabled = false
+}

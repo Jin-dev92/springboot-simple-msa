@@ -3,6 +3,7 @@ package com.example.msa.product;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -39,6 +40,16 @@ class ProductControllerTest {
     void 없는_상품은_404를_반환한다() throws Exception {
         mockMvc.perform(get("/products/9999"))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void 모든_응답에_인스턴스_식별자가_붙는다(@Autowired InstanceId instanceId) throws Exception {
+        // 성공 응답과 에러 응답 모두에 붙어야 분포 집계가 어긋나지 않는다.
+        mockMvc.perform(get("/products/1"))
+                .andExpect(header().string("X-Instance-Id", instanceId.value()));
+
+        mockMvc.perform(get("/products/9999"))
+                .andExpect(header().string("X-Instance-Id", instanceId.value()));
     }
 
     @Test

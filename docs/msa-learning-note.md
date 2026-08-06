@@ -244,18 +244,40 @@ flowchart TB
 
 ### 직접 확인
 
+분포를 세려면 **어느 인스턴스가 응답했는지**를 밖에서 알 수 있어야 합니다. 컨테이너 로그를 문자열로 긁는 방법도 있지만, 로그 형식과 셸 환경(한글 `grep`, `sed` 동작)에 의존해 쉽게 깨집니다. 부하 도구를 붙여도 마찬가지입니다 — Gatling 도 k6 도 "누가 응답했는지"는 모릅니다.
+
+그래서 product-service 가 **모든 응답에 자기 식별자를 헤더로 실어 보냅니다.**
+
+```java
+@Component
+class InstanceIdHeaderFilter extends OncePerRequestFilter {
+    protected void doFilterInternal(req, res, chain) {
+        res.setHeader("X-Instance-Id", instanceId.value());   // 체인을 타기 전에
+        chain.doFilter(req, res);
+    }
+}
+```
+
+컨트롤러가 아니라 필터에 둔 이유는 **에러 응답까지 빠짐없이** 붙어야 하기 때문입니다. 일부 응답에만 헤더가 있으면 집계가 어긋납니다. 그리고 응답이 커밋된 뒤에는 헤더를 추가할 수 없으므로 체인을 타기 전에 세팅합니다.
+
 ```bash
-docker compose up -d --scale product-service=2
-for i in $(seq 1 10); do curl -s -o /dev/null http://localhost:8080/api/products/1; done
-docker compose logs product-service | grep "상품 조회 요청" | sed 's/ *|.*//' | sort | uniq -c
+docker compose up -d --build --scale product-service=2
+
+for i in $(seq 1 20); do
+  curl -s -o /dev/null -D - http://localhost:8080/api/products/1 | grep -i '^x-instance-id'
+done | sort | uniq -c
 ```
 
-실측 결과 (총 17회):
+실측 결과 (총 20회):
 
 ```
-   8 product-service-1
-   9 product-service-2
+  10 X-Instance-Id: 8a2a06f3a842-0cb259
+  10 X-Instance-Id: e11bf3383a34-4770a1
 ```
+
+식별자 앞부분은 호스트명인데, 도커에서는 **컨테이너 ID 와 같습니다.** 그래서 `docker compose ps` 와 바로 대조됩니다. 뒤의 짧은 임의값은 한 머신에서 여러 인스턴스를 띄웠을 때 호스트명이 겹치는 것을 막습니다.
+
+> 이 헤더는 게이트웨이가 그대로 통과시킵니다. Spring Cloud Gateway 는 응답 헤더를 별도 설정 없이 전달하므로, 클라이언트는 게이트웨이 뒤에서 누가 일했는지 볼 수 있습니다. 실무에서 내부 구조를 감춰야 한다면 게이트웨이에서 이런 헤더를 제거하는 필터를 두기도 합니다.
 
 ### 여기서 `server.port: 0` 이 다시 값을 합니다
 

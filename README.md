@@ -147,11 +147,34 @@ curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
 
 ### 인스턴스를 늘려 부하 분산 보기
 
+product-service는 모든 응답에 자기 식별자를 `X-Instance-Id` 헤더로 실어 보냅니다. 이 헤더만 세면 되므로 컨테이너 로그를 파싱할 필요가 없습니다.
+
 ```bash
 docker compose up -d --build --scale product-service=2
 
-for i in $(seq 1 10); do curl -s -o /dev/null http://localhost:8080/api/products/1; done
-docker compose logs product-service | grep "상품 조회 요청" | sed 's/ *|.*//' | sort | uniq -c
+# 어느 인스턴스가 응답했는지 한 번에 확인
+curl -s -D - -o /dev/null http://localhost:8080/api/products/1 | grep -i x-instance-id
+# X-Instance-Id: e11bf3383a34-4770a1
+
+# 20회 요청 후 분포 집계
+for i in $(seq 1 20); do
+  curl -s -o /dev/null -D - http://localhost:8080/api/products/1 | grep -i '^x-instance-id'
+done | sort | uniq -c
+```
+
+실측 결과입니다.
+
+```
+  10 X-Instance-Id: 8a2a06f3a842-0cb259
+  10 X-Instance-Id: e11bf3383a34-4770a1
+```
+
+앞부분은 호스트명이고, 도커에서는 **컨테이너 ID와 같으므로** 어느 컨테이너인지 바로 대조됩니다.
+
+```bash
+docker compose ps --format '{{.Name}}\t{{.ID}}' | grep product
+# springboot-simple-msa-product-service-1	8a2a06f3a842
+# springboot-simple-msa-product-service-2	e11bf3383a34
 ```
 
 ### 장애 상황 만들어 보기

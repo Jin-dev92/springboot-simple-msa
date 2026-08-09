@@ -1125,6 +1125,9 @@ stateDiagram-v2
     CHARGING_PAYMENT --> COMPLETED: CHARGE 성공
     CHARGING_PAYMENT --> COMPENSATING_STOCK: CHARGE 실패
     COMPENSATING_STOCK --> FAILED: RELEASE 완료
+    RESERVING_STOCK --> FAILED: 타임아웃
+    CHARGING_PAYMENT --> COMPENSATING_STOCK: 타임아웃
+    COMPENSATING_STOCK --> COMPENSATING_STOCK: 타임아웃 (RELEASE 재발행)
     COMPLETED --> [*]
     FAILED --> [*]
 ```
@@ -1159,6 +1162,8 @@ List<OrderSaga> stalled = sagas.findByStepInAndUpdatedAtBefore(SagaStep.waiting(
 3. `COMPENSATING_STOCK`에서 멈춤 → `RELEASE`를 다시 보냅니다.
 
 3번에는 재시도 횟수 상한이 없습니다. **보상을 포기하면 재고가 영영 묶인 채 남기 때문입니다.** 참여자 쪽이 멱등하므로 여러 번 보내도 안전합니다.
+
+다만 이 상한 없음은 **응답이 아예 오지 않는 경우**에만 해당합니다. 참여자가 명시적으로 "복구할 수 없다"고 답하는 경우는 다릅니다. `RELEASE` 실패 응답을 받으면 `afterRelease`는 로그만 남기고 곧바로 `FAILED`로 끝내며, `FAILED`는 `SagaStep.waiting()`에서 빠져 있어 스위퍼도 다시 들여다보지 않습니다. 응답이 오지 않는 것과 참여자가 "복구할 수 없다"고 답하는 것은 다릅니다. 후자는 재시도로 풀리지 않으므로 사람 개입이 필요한 상태로 남깁니다.
 
 이 기능의 존재 자체가 오케스트레이션이 무엇을 사는지 보여 줍니다. 진행 상태가 한 테이블에 모였기 때문에 비로소 "어디서 멈췄는가"를 질의할 수 있습니다.
 

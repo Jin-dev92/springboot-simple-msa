@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 주문 Saga 의 조정자. <b>흐름 전체가 이 한 클래스에 있다.</b>
@@ -72,8 +74,11 @@ class OrderSagaOrchestrator {
             case CHARGING_PAYMENT -> afterCharge(saga, reply);
             case COMPENSATING_STOCK -> afterRelease(saga, reply);
             // 위의 expects 검사를 통과했다면 이 분기는 도달할 수 없다. 그래도 던지지 않고
-            // 로그만 남기는 이유: 이 메서드는 카프카 리스너 아래에서 호출되고, 예외를
-            // 던지면 롤백된 메시지가 그대로 재전달되어 무한 루프가 된다.
+            // 로그만 남기는 이유: 이 메서드는 카프카 리스너 아래에서 호출된다. 예외를
+            // 던지면 스프링의 기본 에러 핸들러가 정해진 횟수만 재시도하고(무한이 아니다)
+            // 그래도 실패하면 조용히 오프셋을 넘긴다 — 응답이 그냥 사라진다. 로그만
+            // 남기고 넘어가면 그 응답은 버려지되 사가는 살아 있어, 나중에 스위퍼가
+            // 다시 집어 갈 수 있다. 이 쪽이 진짜 이유다.
             default -> log.error("응답을 기다리지 않는 단계인데 expects 를 통과했다: orderId={}, 단계={}",
                     saga.getOrderId(), saga.getStep());
         }
@@ -125,7 +130,7 @@ class OrderSagaOrchestrator {
         sagas.save(saga);
 
         orders.findById(saga.getOrderId()).ifPresent(order ->
-                kafkaTemplate.send(PaymentCommand.TOPIC, key(order.getId()),
+                sendAfterCommit(PaymentCommand.TOPIC, key(order.getId()),
                         new PaymentCommand(order.getId(), order.getUserId(),
                                 order.getTotalPrice(), PaymentCommand.Action.CHARGE)));
         log.info("재고 확보 완료. 결제를 요청한다: orderId={}", saga.getOrderId());
@@ -186,7 +191,7 @@ class OrderSagaOrchestrator {
     }
 
     private void sendStock(Order order, StockCommand.Action action) {
-        kafkaTemplate.send(StockCommand.TOPIC, key(order.getId()),
+        sendAfterCommit(StockCommand.TOPIC, key(order.getId()),
                 new StockCommand(order.getId(), order.getProductId(), order.getQuantity(), action));
     }
 
@@ -196,5 +201,31 @@ class OrderSagaOrchestrator {
      */
     private static String key(Long orderId) {
         return String.valueOf(orderId);
+    }
+
+    /**
+     * 트랜잭션이 커밋된 뒤에 발행한다.
+     *
+     * <p>트랜잭션 안에서 보내면 <b>커밋이 롤백돼도 명령은 이미 나가 있습니다.</b>
+     * 스위퍼와 응답 리스너가 같은 사가를 동시에 옮겨 낙관적 락으로 한쪽이 롤백되는
+     * 경우가 그렇다. DB 는 되돌아가지만 참여자는 이미 받은 명령을 수행하므로,
+     * 주문은 확정인데 재고는 반납된 상태가 남는다. {@code @Version} 은 행을 지키지
+     * 이미 나간 메시지를 지키지는 못한다.
+     *
+     * <p>반대 방향의 위험은 남는다. 커밋 뒤 발행 직전에 죽으면 명령이 나가지 않는다.
+     * 다만 그때는 사가가 대기 단계에 그대로 머물러 스위퍼가 다시 집어 간다. 둘 중
+     * 되돌릴 수 없는 쪽을 피한 선택이다. 완전한 해결은 Transactional Outbox 다.
+     */
+    private void sendAfterCommit(String topic, String key, Object payload) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            kafkaTemplate.send(topic, key, payload);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                kafkaTemplate.send(topic, key, payload);
+            }
+        });
     }
 }

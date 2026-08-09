@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,6 +54,18 @@ class SagaTimeoutSweeperTest {
 
     @MockitoBean
     private KafkaTemplate<String, Object> kafkaTemplate;
+
+    /**
+     * OrderSagaOrchestratorTest 와 같은 컨텍스트·H2(orderdb)를 공유한다. 그 쪽이
+     * CHARGING_PAYMENT, COMPENSATING_STOCK 에 사가를 남겨 둔 채 끝나므로, 두 클래스
+     * 실행 사이에 30초(sweep 임계) 이상 벌어지면 sweep() 이 그 잔여물까지 함께
+     * 걷어가 발행 횟수(times(1/2/3)) 단언이 깨진다. 매 테스트 전에 비워 격리한다.
+     */
+    @BeforeEach
+    void 남은_사가를_비운다() {
+        sagas.deleteAll();
+        orders.deleteAll();
+    }
 
     private Order startedOrder() {
         Order order = orders.save(new Order(1L, 2L, 4, new BigDecimal("1280000")));

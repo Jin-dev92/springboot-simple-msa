@@ -1,6 +1,7 @@
 package com.example.msa.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -184,8 +185,11 @@ class OrderSagaOrchestratorTest {
 
     @Test
     void 모르는_주문의_응답은_조용히_버린다() {
-        orchestrator.onReply(ok(999999L, "RESERVE"));
+        // sagas.findById(999999L) 가 비어 있다는 것은 onReply 가 무엇을 하든 참이라
+        // 의미가 없다. 실제로 지켜야 할 것은 "던지지 않는다"와 "아무것도 발행하지
+        // 않는다"이다.
+        assertThatNoException().isThrownBy(() -> orchestrator.onReply(ok(999999L, "RESERVE")));
 
-        assertThat(sagas.findById(999999L)).isEmpty();
+        verify(kafkaTemplate, never()).send(any(), any(), any());
     }
 }

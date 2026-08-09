@@ -246,7 +246,7 @@ curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKE
   -H 'Content-Type: application/json' -d '{"productId":3,"quantity":2}'
 sleep 45
 docker compose logs order-service | grep '응답이 없는 사가'
-docker compose start payment-service
+docker compose start payment-service  # 재시작이 바로 학습 노트 11절의 REFUND 구멍을 재현한다 — 밀려 있던 CHARGE 가 CANCELLED 된 주문에서 실제로 돈을 뺀다
 
 # 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do

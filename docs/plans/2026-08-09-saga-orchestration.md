@@ -1457,6 +1457,13 @@ git commit -m "refactor: product-service 를 명령·응답 방식으로 전환
 
 ## Task 5: order-service Saga 상태와 오케스트레이터
 
+> **실행 중 정정 (커밋 `2a80bba`).** 아래 Step 4·6의 코드는 리뷰에서 네 군데가 틀린 것으로 밝혀져 수정된 채 반영되었습니다. 실제 코드는 커밋을 보십시오.
+>
+> 1. **`start`/`onReply`/`onTimeout`은 `public`이어야 합니다.** 스프링 기본 프록시 방식은 **public 메서드에만** `@Transactional`을 적용합니다(`AnnotationTransactionAttributeSource`의 `publicMethodsOnly = true`). 아래 코드대로 package-private으로 두면 세 진입점이 트랜잭션 없이 돌아, "단계 전이와 주문 상태 변경을 한 트랜잭션으로 묶는다"는 이 설계의 근거 자체가 성립하지 않습니다. 같은 함정을 `StockReservationService`와 `PaymentService`가 이미 주석으로 남겨 두었는데 이 계획만 반대로 적었습니다.
+> 2. **`OrderSaga`에 `@Version`이 필요합니다.** Task 7의 스위퍼는 별도 스레드에서 `onTimeout`을 부릅니다. 같은 사가에 응답이 동시에 도착하면 둘 다 `CHARGING_PAYMENT`를 읽고 각각 `COMPLETED`(주문 CONFIRMED)와 `COMPENSATING_STOCK`(RELEASE 발행)으로 갈라져, **주문은 확정인데 재고는 반납된** 상태가 남습니다.
+> 3. **`onReply`의 `default ->`는 예외를 던지면 안 됩니다.** Task 6에서 `onReply`가 `@KafkaListener` 아래로 들어가면 예외가 롤백을 부르고 브로커가 같은 메시지를 무한 재전달합니다. 로그를 남기고 반환합니다.
+> 4. **`onTimeout`의 `RESERVING_STOCK` 주석이 사실과 다릅니다.** "되돌릴 앞 단계가 없다"는 응답이 *실패*였을 때만 참입니다. 타임아웃은 "실패했다"와 "성공했는데 응답이 유실됐다"를 구분하지 못합니다. 동작은 그대로 두고 실제 트레이드오프를 적도록 고쳤습니다.
+
 **Files:**
 - Create: `order-service/src/main/java/com/example/msa/order/SagaStep.java`
 - Create: `order-service/src/main/java/com/example/msa/order/OrderSaga.java`

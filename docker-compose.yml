@@ -87,7 +87,7 @@ services:
       ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
       JWT_SECRET: ${JWT_SECRET:-learning-only-secret-key-do-not-use-in-production-32bytes+}
 
-  # product-service 와 order-service 는 호스트 포트를 열지 않는다.
+  # product-service, order-service, payment-service 는 호스트 포트를 열지 않는다.
   # 외부에서 직접 접근할 방법이 없고, 반드시 게이트웨이를 거쳐야 한다.
   product-service:
     build:
@@ -107,6 +107,25 @@ services:
       EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
       ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
       JWT_SECRET: ${JWT_SECRET:-learning-only-secret-key-do-not-use-in-production-32bytes+}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+  # HTTP 엔드포인트가 아예 없고 Kafka 명령만 받는다. 그래서 호스트 포트도,
+  # 검증할 토큰도 없어 JWT_SECRET 을 주입하지 않는다.
+  payment-service:
+    build:
+      context: .
+      args:
+        SERVICE: payment-service
+    depends_on:
+      discovery-server:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      EUREKA_SERVER_URL: http://discovery-server:8761/eureka
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS: "5"
+      ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
   order-service:

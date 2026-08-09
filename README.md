@@ -24,6 +24,7 @@ Spring Boot 기반 마이크로서비스 아키텍처(MSA)를 **인프라 관점
 | 죽은 상대를 계속 두드려 나까지 느려지는 것 | 서킷 브레이커 (Resilience4j) | [8절](docs/msa-learning-note.md#8-서킷-브레이커--상대의-장애가-나에게-번지는-것을-막는다) |
 | 세션을 공유하지 않고 로그인 상태를 어떻게 아는가 | JWT 인증·인가 (Spring Security) | [9절](docs/msa-learning-note.md#9-인증인가--세션-없이-로그인-상태를-다루기) |
 | 한 트랜잭션으로 묶을 수 없는 일을 어떻게 되돌리는가 | Saga 보상 트랜잭션 | [10절](docs/msa-learning-note.md#10-saga--롤백할-수-없을-때-되돌리는-법) |
+| 흐름이 여러 서비스에 흩어져 어디서 멈췄는지 모르는 것 | Saga 오케스트레이션 | [11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기) |
 | 여러 개를 어떻게 한 번에 띄우는가 | Docker Compose | [부록 A](docs/msa-learning-note.md#부록-a-컨테이너로-묶을-때-부딪히는-것들) |
 
 ---
@@ -40,8 +41,9 @@ flowchart TB
     subgraph apps ["애플리케이션 서비스"]
         gateway["api-gateway<br/>Spring Cloud Gateway<br/>:8080"]
         auth["auth-service<br/>H2 · 랜덤 포트"]
-        order["order-service<br/>H2 · 랜덤 포트"]
+        order["<b>order-service · Saga Orchestrator</b><br/>주문 + Saga 진행 상태 · H2<br/>타임아웃 스위퍼 (30초)"]
         product["product-service<br/>H2 · 랜덤 포트"]
+        payment["payment-service<br/>H2 · 랜덤 포트<br/>HTTP 엔드포인트 없음"]
     end
 
     client -->|"HTTP :8080<br/>Bearer 토큰"| gateway
@@ -50,18 +52,29 @@ flowchart TB
     gateway -->|"/api/products/**"| product
     order -->|"OpenFeign · 동기<br/>가격 조회"| product
 
-    order ==>|"OrderCreated"| kafka
-    kafka ==>|"OrderCreated"| product
-    product ==>|"StockResult"| kafka
-    kafka ==>|"StockResult"| order
+    order ==>|"① stock-command<br/>RESERVE"| kafka
+    kafka ==>|"①"| product
+    product ==>|"② saga-reply"| kafka
+    kafka ==>|"②"| order
+
+    order ==>|"③ payment-command<br/>CHARGE"| kafka
+    kafka ==>|"③"| payment
+    payment ==>|"④ saga-reply"| kafka
+    kafka ==>|"④"| order
+
+    order ==>|"⑤ stock-command · RELEASE<br/>③④가 실패했을 때만"| kafka
 
     apps -.->|"등록 / 조회"| eureka
     apps -.->|"span 전송"| zipkin
 ```
 
 - 얇은 실선: 응답을 기다리는 **동기** 호출
-- 굵은 실선: 응답을 기다리지 않는 **비동기** 이벤트
+- 굵은 실선: 응답을 기다리지 않는 **비동기 명령·응답**
 - 점선: Eureka 등록·조회와 Zipkin span 전송
+
+**번호가 요점입니다.** ③은 ②가 도착한 뒤에 나갑니다. 오케스트레이터가 한 단계씩 결과를 보고 다음을 정하기 때문입니다. 그래서 아래로 향하는 화살표가 **전부 order-service에서 나갑니다** — `product-service`는 자기 다음에 결제가 있다는 것을 모르고, `payment-service`는 앞에 재고 단계가 있었다는 것을 모릅니다.
+
+②나 ④가 오지 않으면 타임아웃 스위퍼가 30초 뒤 ⑤를 대신 발행합니다. 이것이 가능한 이유는 진행 상태가 order-service의 DB 한 곳에 모여 있기 때문입니다. 자세한 것은 [학습 노트 11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기)에 있습니다.
 
 ### 모듈
 
@@ -70,10 +83,11 @@ flowchart TB
 | `discovery-server` | 8761 | Eureka 서버 |
 | `api-gateway` | 8080 | 외부로 열리는 유일한 진입점. 라우팅 + 첫 토큰 검문 |
 | `auth-service` | 0 (랜덤) | 로그인과 JWT 발급 |
-| `product-service` | 0 (랜덤) | 상품 조회·등록, 재고 차감 후 결과 발행 |
-| `order-service` | 0 (랜덤) | 주문 생성, 가격 조회, 이벤트 발행, Saga 결과 처리 |
+| `product-service` | 0 (랜덤) | 상품 조회·등록. 재고 확보와 복구 명령 처리 |
+| `payment-service` | 0 (랜덤) | 결제 명령 처리. HTTP 엔드포인트 없음 |
+| `order-service` | 0 (랜덤) | 주문 생성, 가격 조회, **Saga 오케스트레이션** |
 
-**외부에 열린 포트는 8080·8761·9411 셋뿐입니다.** auth·order·product는 호스트 포트가 없어 게이트웨이를 우회할 수 없습니다.
+**외부에 열린 포트는 8080·8761·9411 셋뿐입니다.** auth·order·product·payment는 호스트 포트가 없어 게이트웨이를 우회할 수 없습니다.
 
 ---
 
@@ -82,6 +96,7 @@ flowchart TB
 ```
 AppUser { id, username, password(BCrypt), role }
 Product { id, name, price, stock }
+Account { userId, balance }
 Order   { id, userId, productId, quantity, totalPrice, status, cancelReason }
 ```
 
@@ -95,7 +110,7 @@ Order   { id, userId, productId, quantity, totalPrice, status, cancelReason }
 
 초기 계정: `user`/`user123` (ROLE_USER), `admin`/`admin123` (ROLE_ADMIN)
 
-주문은 `PENDING`으로 생성된 뒤, 재고 확보 결과에 따라 `CONFIRMED` 또는 `CANCELLED`로 바뀝니다. 자세한 이유는 [학습 노트 10절](docs/msa-learning-note.md#10-saga--롤백할-수-없을-때-되돌리는-법)을 참고하십시오.
+주문은 `PENDING`으로 생성된 뒤 **재고 확보 → 결제** 순으로 진행되며, 둘 다 성공하면 `CONFIRMED`, 어느 한쪽이라도 실패하면 앞 단계를 되돌린 뒤 `CANCELLED`가 됩니다. 초기 계좌 잔액은 사용자당 100만 원입니다. 자세한 이유는 [학습 노트 11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기)을 참고하십시오.
 
 ---
 
@@ -139,7 +154,8 @@ curl -s -X POST http://localhost:8080/api/orders \
   -d '{"productId": 1, "quantity": 3}'
 # {"id":1,...,"totalPrice":267000.00,"status":"PENDING"}
 
-# 잠시 뒤 다시 조회하면 CONFIRMED 로 바뀌어 있다
+# 응답은 PENDING 이다. 재고 확보와 결제가 그 뒤에 순서대로 일어난다.
+# 잠시 뒤 다시 조회하면 CONFIRMED 로 바뀌어 있다.
 curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -219,16 +235,37 @@ curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" -X POST http://localhost
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"productId":1,"quantity":1}'
 
-# Saga 보상 — 재고를 넘는 주문은 CANCELLED 로 되돌아간다
 docker compose start product-service
+
+# Saga 1단계 실패 — 재고를 넘는 주문은 되돌릴 것 없이 CANCELLED
 curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"productId":2,"quantity":9999}'
 
-# 멱등성 — 같은 이벤트를 3번 보내도 재고는 한 번만 깎인다
+# Saga 2단계 실패 + 보상 — 잔액(100만)을 넘는 주문은 재고를 되돌린 뒤 CANCELLED
+curl -s http://localhost:8080/api/products/2 | jq .stock      # 주문 전 재고
+curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":2,"quantity":4}'   # 128만원
+sleep 5
+curl -s http://localhost:8080/api/products/2 | jq .stock      # 같은 값으로 돌아온다
+docker compose logs product-service | grep '재고 복구(보상)'
+
+# 타임아웃 보상 — 참여자가 죽어 응답이 없으면 30초 뒤 스스로 되돌린다
+docker compose stop payment-service
+curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":3,"quantity":2}'
+sleep 45
+docker compose logs order-service | grep '응답이 없는 사가'
+
+# 아래 재시작이 학습 노트 11절의 REFUND 구멍을 그대로 재현한다.
+# 밀려 있던 CHARGE 가 이미 CANCELLED 된 주문에서 실제로 돈을 빼 간다.
+docker compose start payment-service
+docker compose logs payment-service | grep '결제 완료'
+
+# 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do
-  echo '{"orderId":777,"productId":1,"quantity":5}' | \
+  echo '{"orderId":777,"productId":1,"quantity":5,"action":"RESERVE"}' | \
     docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
-    --bootstrap-server localhost:9092 --topic order-created
+    --bootstrap-server localhost:9092 --topic stock-command
 done
 curl -s http://localhost:8080/api/products/1
 ```
@@ -243,15 +280,16 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 ./gradlew :discovery-server:bootRun    # 1. 가장 먼저
 ./gradlew :auth-service:bootRun        # 2.
 ./gradlew :product-service:bootRun     # 3.
-./gradlew :order-service:bootRun       # 4.
-./gradlew :api-gateway:bootRun         # 5.
+./gradlew :payment-service:bootRun     # 4.
+./gradlew :order-service:bootRun       # 5.
+./gradlew :api-gateway:bootRun         # 6.
 ```
 
 ---
 
 ## 단계별 로드맵
 
-한 번에 전부 만들지 않고, 단계마다 **"이게 왜 필요한가"를 체감한 뒤 다음을 얹었습니다.** 각 단계는 커밋 하나에 대응합니다.
+한 번에 전부 만들지 않고, 단계마다 **"이게 왜 필요한가"를 체감한 뒤 다음을 얹었습니다.** Phase 1~7은 각각 커밋 하나에 대응하고, Phase 8은 참여 서비스가 늘어 여러 커밋에 걸쳐 있습니다.
 
 | Phase | 추가한 것 | 검증 기준 |
 |---|---|---|
@@ -262,8 +300,9 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | **5** | Zipkin 분산 추적, Resilience4j 서킷 브레이커 | 한 요청이 하나의 trace로 보임 + 장애 시 즉시 실패 |
 | **6** | JWT 인증·인가 (auth-service, RBAC) | 토큰 없이 401, 권한 부족 시 403, 남의 주문 조회 불가 |
 | **7** | Saga 보상 트랜잭션 + 멱등 소비 | 재고 부족 주문이 CANCELLED로 되돌아감 + 중복 이벤트에도 재고는 한 번만 차감 |
+| **8** | Saga 오케스트레이션 전환 + payment-service | 결제 실패 시 재고가 되돌아감 + 참여자가 죽어도 30초 뒤 스스로 취소됨 |
 
-전부 완료된 상태입니다. 아직 다루지 않은 주제와 그 이유는 [학습 노트 12절](docs/msa-learning-note.md#12-이-프로젝트가-다루지-않은-것)에 있습니다.
+전부 완료된 상태입니다. 아직 다루지 않은 주제와 그 이유는 [학습 노트 13절](docs/msa-learning-note.md#13-이-프로젝트가-다루지-않은-것)에 있습니다.
 
 ---
 
@@ -274,7 +313,7 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | Java | 21 (LTS) | Spring Cloud 생태계가 LTS 기준으로 가장 안정적입니다 |
 | Spring Boot | 3.5.3 | |
 | Spring Cloud | 2025.0.0 | Boot 3.5와 짝을 이루는 릴리스 트레인입니다 |
-| 빌드 | Gradle 멀티모듈 (Groovy DSL) | 서브프로젝트 5개를 한 저장소에서 버전 통합 관리합니다 |
+| 빌드 | Gradle 멀티모듈 (Groovy DSL) | 서브프로젝트 6개를 한 저장소에서 버전 통합 관리합니다 |
 | 서비스 디스커버리 | Netflix Eureka | 등록/해제를 대시보드로 직접 볼 수 있어 학습에 유리합니다 |
 | 게이트웨이 | Spring Cloud Gateway (WebFlux) | |
 | 동기 통신 | OpenFeign | 인터페이스 선언만으로 클라이언트가 생성되고 서킷 브레이커를 붙이기 쉽습니다 |
@@ -284,6 +323,7 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | 인증 | Spring Security + JWT (HS256) | `jjwt` 등 외부 라이브러리 없이 표준 스택으로 발급·검증합니다 |
 | 부하 테스트 | Gatling 3.15 (Java DSL) | 시나리오를 자바 코드로 관리해 Git 리뷰와 CI 실행이 가능합니다 |
 | 저장소 | H2 (인메모리, 서비스별 분리) | 기동이 빠르고 Database per Service 원칙은 그대로 체감됩니다 |
+| Saga 방식 | 오케스트레이션 (코레오그래피에서 전환) | 흐름이 한 클래스에 모여 추적이 쉽고, 진행 상태를 저장한 덕에 타임아웃 보상이 가능해집니다 |
 
 > **버전 주의**: Spring Cloud 2025.0.0부터 게이트웨이 의존성이 `spring-cloud-starter-gateway-server-webflux`로, 설정 키가 `spring.cloud.gateway.server.webflux.*`로 바뀌었습니다. 검색되는 자료 대부분이 옛 이름 기준입니다.
 
@@ -309,5 +349,6 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | 서명 알고리즘 | HS256 (대칭키) — 검증만 하는 서비스도 토큰을 발급할 수 있음 | RS256 (비대칭키) |
 | 토큰 만료·로그아웃 | 1시간 만료, 갱신·무효화 수단 없음 | 짧은 액세스 토큰 + 리프레시 토큰 |
 | 서비스 간 통신 | 평문 HTTP | mTLS 또는 서비스 메시 |
+| 타임아웃 뒤 늦은 결제 | 취소된 주문인데 **돈이 빠져나갑니다.** 늦게 도착한 성공 응답을 버리기만 하고 `REFUND`를 보내지 않습니다 | 늦은 성공 응답에 보상을 발행하거나, 보상 전에 참여자에게 처리 여부를 되묻기 |
 
 `JWT_SECRET=... docker compose up`으로 덮어쓸 수 있습니다. 자세한 논의는 [학습 노트 9절](docs/msa-learning-note.md#9-인증인가--세션-없이-로그인-상태를-다루기)에 있습니다.

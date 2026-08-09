@@ -31,7 +31,7 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
-        spring.json.value.default.type: com.example.msa.order.StockResultEvent
+        spring.json.value.default.type: com.example.msa.order.SagaReply
         spring.json.trusted.packages: com.example.msa.order
     listener:
       observation-enabled: true
@@ -72,3 +72,12 @@ jwt:
   # 모든 서비스가 같은 열쇠를 알아야 서명을 검증할 수 있다.
   # 경고: 학습용 기본값이다. 실제 서비스에서는 Secrets Manager/Vault 로 주입해야 한다.
   secret: ${JWT_SECRET:learning-only-secret-key-do-not-use-in-production-32bytes+}
+
+saga:
+  timeout:
+    # 이 시간 동안 응답이 없으면 멈춘 것으로 보고 보상을 시작한다.
+    # 학습용이라 짧게 잡았다. 실제로는 참여자의 정상 처리 시간 분포를 보고
+    # 꼬리 지연(p99)보다 넉넉히 크게 잡아야 멀쩡한 요청을 취소하지 않는다.
+    threshold: 30s
+    # 위 임계를 넘은 사가가 있는지 확인하는 주기.
+    check-interval: 10s

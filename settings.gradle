@@ -6,6 +6,7 @@ include 'auth-service'
 include 'api-gateway'
 include 'product-service'
 include 'order-service'
+include 'payment-service'
 
 // 서비스가 아니라 부하 테스트 시나리오만 담는 모듈. 배포 산출물이 없다.
 include 'load-test'

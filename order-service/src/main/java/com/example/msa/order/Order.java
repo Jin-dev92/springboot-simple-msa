@@ -55,7 +55,7 @@ public class Order {
         this.status = OrderStatus.PENDING;
     }
 
-    /** 재고를 잡았다는 통보를 받았을 때. */
+    /** 모든 단계(재고 확보, 결제)가 끝났다는 통보를 받았을 때. */
     void confirm() {
         this.status = OrderStatus.CONFIRMED;
     }

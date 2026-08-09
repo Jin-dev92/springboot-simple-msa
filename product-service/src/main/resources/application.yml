@@ -37,7 +37,7 @@ spring:
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
         # 발신측이 클래스 정보를 헤더에 담지 않으므로, 어떤 타입으로 읽을지 여기서 정한다.
-        spring.json.value.default.type: com.example.msa.product.OrderCreatedEvent
+        spring.json.value.default.type: com.example.msa.product.StockCommand
         spring.json.trusted.packages: com.example.msa.product
     listener:
       # 발신측이 실어 보낸 추적 정보를 이어받는다.

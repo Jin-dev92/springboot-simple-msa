@@ -6,7 +6,6 @@ import jakarta.validation.constraints.Positive;
 import java.math.BigDecimal;
 import java.util.List;
 import org.springframework.http.HttpStatus;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,13 +23,13 @@ class OrderController {
 
     private final OrderRepository repository;
     private final ProductClient productClient;
-    private final KafkaTemplate<String, Object> kafkaTemplate;
+    private final OrderSagaOrchestrator orchestrator;
 
     OrderController(OrderRepository repository, ProductClient productClient,
-            KafkaTemplate<String, Object> kafkaTemplate) {
+            OrderSagaOrchestrator orchestrator) {
         this.repository = repository;
         this.productClient = productClient;
-        this.kafkaTemplate = kafkaTemplate;
+        this.orchestrator = orchestrator;
     }
 
     /**
@@ -75,10 +74,10 @@ class OrderController {
      * 이벤트만 던지고 바로 응답한다. 대신 "주문 직후 재고를 조회하면 아직 안 깎여 있을 수
      * 있다"는 것을 받아들여야 한다. 이를 결과적 일관성(eventual consistency)이라고 한다.
      *
-     * <p>그래서 이 시점의 주문은 <b>PENDING</b> 이다. 재고를 잡았는지 아직 모르기 때문이다.
-     * 결과가 돌아오면 {@link StockResultListener} 가 CONFIRMED 또는 CANCELLED 로 바꾼다.
-     * 201 이 "주문이 확정됐다"가 아니라 "주문 요청을 접수했다"라는 뜻이 된다는 점이
-     * 나누기 전과 달라진 부분이다.
+     * <p>그래서 이 시점의 주문은 <b>PENDING</b> 이다. 재고와 결제가 끝났는지 아직 모르기
+     * 때문이다. 이후 진행은 {@link OrderSagaOrchestrator} 가 맡는다. 컨트롤러는 어떤
+     * 메시지를 어느 토픽으로 보내는지 알 필요가 없다. 201 이 "주문이 확정됐다"가 아니라
+     * "주문 요청을 접수했다"라는 뜻이 된다는 점이 나누기 전과 달라진 부분이다.
      */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -88,8 +87,7 @@ class OrderController {
         Order order = repository.save(
                 new Order(userIdOf(jwt), product.id(), request.quantity(), totalPrice));
 
-        kafkaTemplate.send(OrderCreatedEvent.TOPIC,
-                new OrderCreatedEvent(order.getId(), order.getProductId(), order.getQuantity()));
+        orchestrator.start(order);
         return order;
     }
 

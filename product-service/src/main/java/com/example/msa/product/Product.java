@@ -43,6 +43,17 @@ public class Product {
         return true;
     }
 
+    /**
+     * 차감했던 재고를 되돌린다. Saga 의 <b>보상</b>에 쓰인다.
+     *
+     * <p>차감과 달리 상한을 검사하지 않는다. 되돌리는 수량은 앞서 실제로 차감한
+     * 수량이므로 원래 값을 넘을 수 없고, 넘는다면 그것은 명령이 잘못된 것이지
+     * 여기서 막을 일이 아니다. 중복 실행은 호출하는 쪽에서 멱등 기록으로 막는다.
+     */
+    public void increaseStock(int quantity) {
+        stock += quantity;
+    }
+
     public Long getId() {
         return id;
     }

@@ -1,0 +1,54 @@
+server:
+  port: 0
+
+spring:
+  application:
+    name: payment-service
+  datasource:
+    # 서비스마다 DB 를 분리한다(Database per Service). 이름이 겹치면 안 된다.
+    url: jdbc:h2:mem:paymentdb
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    # data.sql 이 Hibernate 의 테이블 생성보다 먼저 실행되지 않도록 미룬다.
+    defer-datasource-initialization: true
+  sql:
+    init:
+      mode: always
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    template:
+      observation-enabled: true
+    consumer:
+      group-id: payment-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        # 이 서비스가 구독하는 토픽은 payment-command 하나뿐이므로 기본 타입도 하나다.
+        spring.json.value.default.type: com.example.msa.payment.PaymentCommand
+        spring.json.trusted.packages: com.example.msa.payment
+    listener:
+      observation-enabled: true
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}

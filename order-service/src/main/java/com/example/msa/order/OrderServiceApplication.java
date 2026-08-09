@@ -6,9 +6,13 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.context.annotation.Bean;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 // @EnableFeignClients: @FeignClient 인터페이스를 찾아 HTTP 호출 구현체를 만들어 준다.
+// @EnableScheduling: SagaTimeoutSweeper 의 @Scheduled 를 실제로 돌린다. 이게 없으면
+// 애너테이션만 붙어 있고 아무 일도 일어나지 않는다.
 @EnableFeignClients
+@EnableScheduling
 @SpringBootApplication
 public class OrderServiceApplication {
 

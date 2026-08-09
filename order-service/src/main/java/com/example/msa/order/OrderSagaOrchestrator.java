@@ -1,12 +1,11 @@
 package com.example.msa.order;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 주문 Saga 의 조정자. <b>흐름 전체가 이 한 클래스에 있다.</b>
@@ -28,13 +27,15 @@ class OrderSagaOrchestrator {
 
     private final OrderRepository orders;
     private final OrderSagaRepository sagas;
-    private final KafkaTemplate<String, Object> kafkaTemplate;
+    private final OutboxRepository outbox;
+    private final ObjectMapper objectMapper;
 
     OrderSagaOrchestrator(OrderRepository orders, OrderSagaRepository sagas,
-            KafkaTemplate<String, Object> kafkaTemplate) {
+            OutboxRepository outbox, ObjectMapper objectMapper) {
         this.orders = orders;
         this.sagas = sagas;
-        this.kafkaTemplate = kafkaTemplate;
+        this.outbox = outbox;
+        this.objectMapper = objectMapper;
     }
 
     /** 주문이 저장된 직후 호출된다. 첫 단계인 재고 확보를 시작한다. */
@@ -130,7 +131,7 @@ class OrderSagaOrchestrator {
         sagas.save(saga);
 
         orders.findById(saga.getOrderId()).ifPresent(order ->
-                sendAfterCommit(PaymentCommand.TOPIC, key(order.getId()),
+                toOutbox(PaymentCommand.TOPIC, key(order.getId()),
                         new PaymentCommand(order.getId(), order.getUserId(),
                                 order.getTotalPrice(), PaymentCommand.Action.CHARGE)));
         log.info("재고 확보 완료. 결제를 요청한다: orderId={}", saga.getOrderId());
@@ -191,7 +192,7 @@ class OrderSagaOrchestrator {
     }
 
     private void sendStock(Order order, StockCommand.Action action) {
-        sendAfterCommit(StockCommand.TOPIC, key(order.getId()),
+        toOutbox(StockCommand.TOPIC, key(order.getId()),
                 new StockCommand(order.getId(), order.getProductId(), order.getQuantity(), action));
     }
 
@@ -204,28 +205,29 @@ class OrderSagaOrchestrator {
     }
 
     /**
-     * 트랜잭션이 커밋된 뒤에 발행한다.
+     * 메시지를 브로커가 아니라 <b>같은 DB 의 outbox 테이블에</b> 쓴다.
      *
-     * <p>트랜잭션 안에서 보내면 <b>커밋이 롤백돼도 명령은 이미 나가 있습니다.</b>
-     * 스위퍼와 응답 리스너가 같은 사가를 동시에 옮겨 낙관적 락으로 한쪽이 롤백되는
-     * 경우가 그렇다. DB 는 되돌아가지만 참여자는 이미 받은 명령을 수행하므로,
-     * 주문은 확정인데 재고는 반납된 상태가 남는다. {@code @Version} 은 행을 지키지
-     * 이미 나간 메시지를 지키지는 못한다.
+     * <p>이 한 줄이 Phase 10 의 전부다. 호출하는 쪽은 전부 {@code @Transactional}
+     * 안이므로, 사가 단계 전이와 이 메시지가 <b>하나의 트랜잭션에 함께 커밋</b>된다.
+     * 둘 다 남거나 둘 다 사라지므로 "상태는 바뀌었는데 명령이 안 나간" 상태가
+     * 원천적으로 생기지 않는다.
      *
-     * <p>반대 방향의 위험은 남는다. 커밋 뒤 발행 직전에 죽으면 명령이 나가지 않는다.
-     * 다만 그때는 사가가 대기 단계에 그대로 머물러 스위퍼가 다시 집어 간다. 둘 중
-     * 되돌릴 수 없는 쪽을 피한 선택이다. 완전한 해결은 Transactional Outbox 다.
+     * <p>이전에는 커밋 이후에 직접 발행했다({@code sendAfterCommit}). 순서를 바꿔
+     * 최악은 피했지만, 커밋 뒤 발행 직전에 죽으면 명령이 유실되는 창이 남아 있었다.
+     * 이제 그 창이 없다.
+     *
+     * <p>실제 발행은 {@link OutboxRelay} 가 맡는다. 그래서 <b>브로커가 죽어 있어도
+     * 주문은 정상적으로 커밋된다.</b> 대가는 릴레이 주기만큼의 지연과, 발행 후 표시
+     * 직전에 죽으면 생기는 중복이다. 중복은 참여자 쪽 멱등 기록이 흡수한다.
+     * <b>유실 가능성을 지연과 중복 가능성으로 바꾼 것</b>이 이 패턴의 요지다.
      */
-    private void sendAfterCommit(String topic, String key, Object payload) {
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            kafkaTemplate.send(topic, key, payload);
-            return;
+    private void toOutbox(String topic, String key, Object payload) {
+        try {
+            outbox.save(new OutboxMessage(topic, key, objectMapper.writeValueAsString(payload)));
+        } catch (JsonProcessingException e) {
+            // 직렬화 실패는 데이터가 잘못된 것이지 일시적 장애가 아니다. 재시도로
+            // 풀리지 않으므로 트랜잭션을 되돌려 사가 전이까지 함께 취소한다.
+            throw new IllegalStateException("outbox 메시지 직렬화 실패: " + topic, e);
         }
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                kafkaTemplate.send(topic, key, payload);
-            }
-        });
     }
 }

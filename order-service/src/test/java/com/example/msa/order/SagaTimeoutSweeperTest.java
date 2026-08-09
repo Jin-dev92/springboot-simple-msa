@@ -1,21 +1,17 @@
 package com.example.msa.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.domain.Sort;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
  * 응답이 오지 않은 채 시간이 지난 Saga 를 스위퍼가 걷어내는지 확인한다.
@@ -33,7 +29,9 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
         "spring.kafka.admin.auto-create=false",
         // 스케줄러가 테스트 도중 제멋대로 돌지 않도록 주기를 아주 길게 잡는다.
         // 검증은 sweep() 을 직접 불러서 한다.
-        "saga.timeout.check-interval=1h"
+        "saga.timeout.check-interval=1h",
+        // 릴레이도 마찬가지다. 브로커가 없는데 발행을 시도하면 로그만 시끄러워진다.
+        "outbox.poll-interval=1h"
 })
 class SagaTimeoutSweeperTest {
 
@@ -52,8 +50,25 @@ class SagaTimeoutSweeperTest {
     @Autowired
     private JdbcTemplate jdbc;
 
-    @MockitoBean
-    private KafkaTemplate<String, Object> kafkaTemplate;
+    @Autowired
+    private OutboxRepository outbox;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    /** outbox 에 쌓인 해당 토픽의 메시지를 삽입 순서대로 돌려준다. */
+    private <T> List<T> outboxed(String topic, Class<T> type) {
+        return outbox.findAll(Sort.by("id")).stream()
+                .filter(m -> m.getTopic().equals(topic))
+                .map(m -> {
+                    try {
+                        return objectMapper.readValue(m.getPayload(), type);
+                    } catch (Exception e) {
+                        throw new IllegalStateException("outbox payload 역직렬화 실패", e);
+                    }
+                })
+                .toList();
+    }
 
     /**
      * OrderSagaOrchestratorTest 와 같은 컨텍스트·H2(orderdb)를 공유한다. 그 쪽이
@@ -65,6 +80,7 @@ class SagaTimeoutSweeperTest {
     void 남은_사가를_비운다() {
         sagas.deleteAll();
         orders.deleteAll();
+        outbox.deleteAll();
     }
 
     private Order startedOrder() {
@@ -116,10 +132,9 @@ class SagaTimeoutSweeperTest {
         assertThat(reloaded(order.getId()).getCancelReason()).contains("재고 확보 응답이 없어");
 
         // 잡은 재고가 없으므로 보상 명령이 나가면 안 된다. (start 의 RESERVE 1건뿐)
-        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
-        verify(kafkaTemplate).send(eq(StockCommand.TOPIC), any(String.class), captor.capture());
-        assertThat(((StockCommand) captor.getValue()).action())
-                .isEqualTo(StockCommand.Action.RESERVE);
+        List<StockCommand> commands = outboxed(StockCommand.TOPIC, StockCommand.class);
+        assertThat(commands).hasSize(1);
+        assertThat(commands.get(0).action()).isEqualTo(StockCommand.Action.RESERVE);
     }
 
     @Test
@@ -132,11 +147,9 @@ class SagaTimeoutSweeperTest {
 
         assertThat(stepOf(order.getId())).isEqualTo(SagaStep.COMPENSATING_STOCK);
 
-        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
-        verify(kafkaTemplate, org.mockito.Mockito.times(2))
-                .send(eq(StockCommand.TOPIC), any(String.class), captor.capture());
-        assertThat(((StockCommand) captor.getAllValues().get(1)).action())
-                .isEqualTo(StockCommand.Action.RELEASE);
+        List<StockCommand> commands = outboxed(StockCommand.TOPIC, StockCommand.class);
+        assertThat(commands).hasSize(2);
+        assertThat(commands.get(1).action()).isEqualTo(StockCommand.Action.RELEASE);
     }
 
     @Test
@@ -151,8 +164,7 @@ class SagaTimeoutSweeperTest {
         // 단계는 그대로 두고 명령만 재발행한다. 재고는 반드시 되돌아가야 하므로
         // 횟수 상한을 두지 않는다. 참여자 쪽이 멱등하므로 여러 번 보내도 안전하다.
         assertThat(stepOf(order.getId())).isEqualTo(SagaStep.COMPENSATING_STOCK);
-        verify(kafkaTemplate, org.mockito.Mockito.times(3))
-                .send(eq(StockCommand.TOPIC), any(String.class), any());
+        assertThat(outboxed(StockCommand.TOPIC, StockCommand.class)).hasSize(3);
     }
 
     @Test
@@ -166,11 +178,8 @@ class SagaTimeoutSweeperTest {
 
         assertThat(stepOf(order.getId())).isEqualTo(SagaStep.COMPLETED);
         assertThat(reloaded(order.getId()).getStatus()).isEqualTo(OrderStatus.CONFIRMED);
-        verify(kafkaTemplate, never())
-                .send(eq(StockCommand.TOPIC), any(String.class),
-                        org.mockito.ArgumentMatchers.argThat(c ->
-                                c instanceof StockCommand s
-                                        && s.action() == StockCommand.Action.RELEASE));
+        assertThat(outboxed(StockCommand.TOPIC, StockCommand.class))
+                .noneMatch(c -> c.action() == StockCommand.Action.RELEASE);
     }
 
     @Test

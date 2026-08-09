@@ -1,5 +1,6 @@
 package com.example.msa.order;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
@@ -9,12 +10,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -28,7 +29,8 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
         "eureka.client.enabled=false",
         "management.tracing.enabled=false",
         "spring.kafka.admin.auto-create=false",
-        "saga.timeout.check-interval=1h"
+        "saga.timeout.check-interval=1h",
+        "outbox.poll-interval=1h"
 })
 @AutoConfigureMockMvc
 class OrderControllerTest {
@@ -39,9 +41,15 @@ class OrderControllerTest {
     @MockitoBean
     private ProductClient productClient;
 
-    // 브로커가 없으므로 발행도 가짜로 바꾼다. 대신 "무엇을 발행했는지"는 검증한다.
-    @MockitoBean
-    private KafkaTemplate<String, Object> kafkaTemplate;
+    // Phase 10 부터 컨트롤러 경로의 발행 대상은 브로커가 아니라 outbox 테이블이다.
+    // 그래서 가짜 KafkaTemplate 대신 테이블을 직접 확인한다.
+    @Autowired
+    private OutboxRepository outbox;
+
+    @BeforeEach
+    void 아웃박스를_비운다() {
+        outbox.deleteAll();
+    }
 
     /** uid 클레임을 담은 토큰으로 인증된 요청을 만든다. 실제 서명은 필요 없다. */
     private static <T extends MockHttpServletRequestBuilder> T asUser(T request, long userId) {
@@ -65,13 +73,15 @@ class OrderControllerTest {
                 .andExpect(jsonPath("$.userId").value(7))
                 .andExpect(jsonPath("$.totalPrice").value(267000));
 
-        org.mockito.Mockito.verify(kafkaTemplate).send(
-                org.mockito.ArgumentMatchers.eq(StockCommand.TOPIC),
-                org.mockito.ArgumentMatchers.any(String.class),
-                org.mockito.ArgumentMatchers.argThat(command ->
-                        command instanceof StockCommand c
-                                && c.productId() == 1L && c.quantity() == 3
-                                && c.action() == StockCommand.Action.RESERVE));
+        // 주문과 함께 재고 확보 명령이 같은 트랜잭션으로 outbox 에 들어갔어야 한다.
+        assertThat(outbox.findAll())
+                .singleElement()
+                .satisfies(m -> {
+                    assertThat(m.getTopic()).isEqualTo(StockCommand.TOPIC);
+                    assertThat(m.getPayload()).contains("\"action\":\"RESERVE\"");
+                    assertThat(m.getPublishedAt()).as("릴레이가 돌기 전이므로 미발행이어야 한다")
+                            .isNull();
+                });
     }
 
     /**

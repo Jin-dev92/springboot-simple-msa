@@ -61,11 +61,20 @@ public class OrderServiceApplication {
      *
      * <p>그래서 값도 문자열 그대로 내보내는 발행기를 따로 둔다. 나머지 설정
      * (부트스트랩 주소 등)은 {@code spring.kafka.*} 에서 그대로 가져온다.
+     *
+     * <p>{@code spring.kafka.template.observation-enabled} 는 자동 설정용이므로
+     * 직접 만든 이 템플릿에는 적용되지 않는다. 여기서 켜지 않으면 Zipkin 추적이 끊긴다.
+     * 다만 <b>이 발행의 span 은 원래 요청이 아니라 릴레이에 붙는다.</b> outbox 를 거치는
+     * 순간 발행이 요청과 다른 스레드·다른 시점으로 떨어지기 때문이다. 유실을 막는
+     * 대가로 추적의 연결이 한 번 끊기는 셈이다.
      */
     @Bean
     KafkaTemplate<String, String> outboxKafkaTemplate(KafkaProperties properties) {
         Map<String, Object> config = new HashMap<>(properties.buildProducerProperties(null));
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(config));
+        KafkaTemplate<String, String> template =
+                new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(config));
+        template.setObservationEnabled(true);
+        return template;
     }
 }

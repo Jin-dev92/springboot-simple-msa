@@ -5,6 +5,8 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import java.math.BigDecimal;
 import java.util.List;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -12,6 +14,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -47,6 +50,24 @@ class OrderController {
     @GetMapping
     List<Order> findMyOrders(@AuthenticationPrincipal Jwt jwt) {
         return repository.findByUserId(userIdOf(jwt));
+    }
+
+    /**
+     * 주문 목록에 <b>현재</b> 재고를 붙여 재고 적은 순으로 돌려준다.
+     *
+     * <p>Phase 11 이 존재하는 이유가 이 한 줄이다. 정렬 기준인 재고가 다른 서비스의
+     * 현재 상태라, 12절의 스냅샷으로는 답할 수 없다. 상품 복제본을 이 DB 에 두었기
+     * 때문에 <b>정렬도 페이징도 DB 에서</b> 끝난다.
+     *
+     * <p>이 경로는 product-service 를 호출하지 않는다. 그래서 상대가 죽어 있어도
+     * 화면이 뜬다 — 재고 값이 그만큼 낡아 있을 뿐이다. 얼마나 낡았는지는
+     * {@code stockUpdatedAt} 으로 함께 내보낸다.
+     */
+    @GetMapping("/summary")
+    Page<OrderSummary> findMySummaries(@AuthenticationPrincipal Jwt jwt,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return repository.findSummariesByUserId(userIdOf(jwt), PageRequest.of(page, size));
     }
 
     @GetMapping("/{id}")

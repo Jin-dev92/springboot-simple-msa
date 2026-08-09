@@ -64,6 +64,10 @@ management:
     tracing:
       endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
 
+outbox:
+  # outbox 에 쌓인 상품 변경 이벤트를 내보내는 주기.
+  poll-interval: 1s
+
 jwt:
   # 모든 서비스가 같은 열쇠를 알아야 서명을 검증할 수 있다.
   # 경고: 학습용 기본값이다. 실제 서비스에서는 Secrets Manager/Vault 로 주입해야 한다.

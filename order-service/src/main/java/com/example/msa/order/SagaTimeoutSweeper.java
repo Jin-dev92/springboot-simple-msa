@@ -54,6 +54,19 @@ class SagaTimeoutSweeper {
         log.warn("응답이 없는 사가 {}건을 처리한다 (임계 {})", stalled.size(), timeout);
         // 조회 결과를 그대로 들고 반복한다. 각 호출이 별도 트랜잭션이므로
         // 오케스트레이터가 상태를 다시 읽어 확인한다.
-        stalled.forEach(saga -> orchestrator.onTimeout(saga.getOrderId()));
+        //
+        // 한 건이 실패해도 여기서 삼켜야 나머지가 이번 주기에 계속 처리된다.
+        // 낙관적 락 충돌(응답 리스너가 같은 사가를 동시에 옮긴 경우)이
+        // 대표적이며, 실패한 사가는 updated_at 이 그대로라 다음 주기에
+        // 다시 잡히므로 여기서 재시도할 필요가 없다. 빈마다 별도 트랜잭션으로
+        // 도는 이점을 루프에서 되돌리지 않기 위한 것이다.
+        for (OrderSaga saga : stalled) {
+            try {
+                orchestrator.onTimeout(saga.getOrderId());
+            } catch (Exception e) {
+                log.error("사가 타임아웃 처리 실패, 다음 주기에 재시도한다 (orderId={})",
+                        saga.getOrderId(), e);
+            }
+        }
     }
 }

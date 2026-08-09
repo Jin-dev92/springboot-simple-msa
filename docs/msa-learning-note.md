@@ -52,8 +52,9 @@ flowchart TB
     subgraph net ["Docker Compose 네트워크"]
         gateway["api-gateway<br/>:8080 · 외부 공개"]
         auth["auth-service<br/>랜덤 포트 · 비공개"]
-        order["order-service<br/>랜덤 포트 · 비공개"]
+        order["order-service<br/>랜덤 포트 · 비공개<br/>Saga Orchestrator"]
         product["product-service<br/>랜덤 포트 · 비공개"]
+        payment["payment-service<br/>랜덤 포트 · 비공개"]
         eureka[("discovery-server<br/>:8761 · 외부 공개")]
         kafka[["kafka<br/>:9092 · 비공개"]]
         zipkin[/"zipkin<br/>:9411 · 외부 공개"/]
@@ -62,14 +63,19 @@ flowchart TB
     client --> gateway
     gateway --> auth
     gateway --> order
+    gateway --> product
     order --> product
-    order ==>|"OrderCreated"| kafka
-    kafka ==>|"OrderCreated"| product
-    product ==>|"StockResult"| kafka
-    kafka ==>|"StockResult"| order
+    order ==>|"stock-command"| kafka
+    order ==>|"payment-command"| kafka
+    kafka ==> product
+    kafka ==> payment
+    product ==>|"saga-reply"| kafka
+    payment ==>|"saga-reply"| kafka
+    kafka ==>|"saga-reply"| order
 
     order -.-> eureka
     product -.-> eureka
+    payment -.-> eureka
     auth -.-> eureka
     gateway -.-> eureka
 
@@ -77,23 +83,27 @@ flowchart TB
     auth -.-> zipkin
     order -.-> zipkin
     product -.-> zipkin
+    payment -.-> zipkin
 ```
 
-**외부에 열린 포트는 셋뿐입니다.** 8080(게이트웨이), 8761(Eureka 대시보드), 9411(Zipkin UI). auth-service, order-service, product-service는 호스트 포트를 갖지 않으므로 외부에서 직접 부를 방법이 없습니다. 게이트웨이를 우회할 수 없는 구조가 설정으로 강제되어 있습니다.
+**외부에 열린 포트는 셋뿐입니다.** 8080(게이트웨이), 8761(Eureka 대시보드), 9411(Zipkin UI). auth-service, order-service, product-service, payment-service는 호스트 포트를 갖지 않으므로 외부에서 직접 부를 방법이 없습니다. 게이트웨이를 우회할 수 없는 구조가 설정으로 강제되어 있습니다.
+
+Kafka를 오가는 굵은 화살표가 전부 order-service를 거치는 것이 이 구성의 특징입니다. 왜 그런 모양이 되었는지는 11절에서 다룹니다.
 
 ### 코드 지도
 
 | 파일 | 역할 |
 |---|---|
-| `settings.gradle` | 5개 서브프로젝트 등록 |
+| `settings.gradle` | 6개 서브프로젝트 등록 |
 | `build.gradle` | 공통 설정(Java 21, BOM, `jar` 태스크 비활성화) |
-| `Dockerfile` | 5개 서비스가 공유하는 단일 이미지 정의 |
+| `Dockerfile` | 모든 서비스가 공유하는 단일 이미지 정의 |
 | `docker-compose.yml` | 컨테이너 구성, 기동 순서, 환경변수 주입 |
 | `discovery-server/` | Eureka 서버. 클래스 1개가 전부 |
 | `auth-service/` | 로그인과 JWT 발급 |
 | `api-gateway/` | 라우팅 규칙(`application.yml`)이 본체 |
-| `product-service/` | 상품 조회·등록 + 재고 차감 후 결과 발행 |
-| `order-service/` | 주문 생성 + Feign 호출 + 이벤트 발행 + 서킷 브레이커 + Saga 결과 처리 |
+| `product-service/` | 상품 조회·등록 + 재고 확보·복구 명령 처리 |
+| `payment-service/` | 결제 명령 처리. HTTP 엔드포인트가 없다 |
+| `order-service/` | 주문 생성 + Feign 호출 + 서킷 브레이커 + **Saga 오케스트레이션** |
 
 ---
 
@@ -345,6 +355,8 @@ public interface ProductClient {
 ---
 
 ## 6. 비동기 통신 — Kafka
+
+> **이 절의 코드 예시는 Phase 4 시점입니다.** 토픽 이름(`order-created`)과 메시지 타입(`OrderCreatedEvent`)은 Phase 8에서 명령/응답 구조로 바뀌어 지금 저장소에는 없습니다. 발행·구독의 원리를 보는 데는 이쪽이 단순해 그대로 두었습니다. 현재 토픽 구성은 11절에 있습니다.
 
 ### 문제
 
@@ -802,6 +814,8 @@ admin 이 /api/orders/1 조회 → 404
 
 ## 10. Saga — 롤백할 수 없을 때 되돌리는 법
 
+> **이 절의 코드는 Phase 7 시점입니다.** Phase 8에서 오케스트레이션으로 바꾸면서 여기 나오는 `OrderCreatedEvent`·`StockResultEvent`와 두 리스너는 삭제됐습니다. 지금 저장소에는 없으므로 커밋 `984c313`에서 보십시오. **일부러 남겨 둔 절입니다.** Saga가 무엇인지는 이쪽이 더 단순하게 보여 주고, 11절이 이것을 "무엇이 불편했는가"의 출발점으로 씁니다.
+
 ### 문제
 
 6절의 재고 차감에는 구멍이 있었습니다. 재고가 부족하면 로그만 남기고 이벤트를 버렸습니다. 그 결과는 이렇습니다.
@@ -1045,7 +1059,197 @@ dual write는 멱등성 처리로 **완화**되었습니다. 발행 직전에 �
 
 ---
 
-## 11. 한 요청의 전 생애
+## 11. 오케스트레이션 — 흐름을 한 곳으로 모으기
+
+10절의 Saga는 **코레오그래피(choreography)** 방식이었습니다. 중앙에 지시자를 두지 않고, 각 서비스가 남이 발행한 이벤트를 듣고 자기 판단으로 다음 행동을 하는 방식입니다. 무용수들이 지휘자 없이 서로를 보며 맞춰 추는 군무에서 온 이름입니다.
+
+### 코레오그래피로 두면 무엇이 불편한가
+
+두 가지가 걸립니다.
+
+**첫째, 흐름이 코드 어디에도 적혀 있지 않습니다.** "재고를 잡은 뒤 무엇을 하는가"는 `OrderCreatedListener`와 `StockResultListener` 두 파일에 나뉘어 있었습니다. 전체 순서를 알려면 두 서비스의 파일을 각각 읽고 머릿속에서 이어 붙여야 합니다. 참여자가 늘면 그만큼 더 흩어집니다.
+
+**둘째, 진행 상태를 아무도 들고 있지 않습니다.** 주문이 `PENDING`에서 멈춰 있을 때, 요청이 상대에게 도달하지 못한 것인지 처리는 됐는데 응답이 유실된 것인지 판단할 근거가 시스템 어디에도 없습니다. 그래서 10절 끝에 남겨 둔 "타임아웃" 문제는 코레오그래피 구조에서는 **손댈 방법 자체가 없었습니다.** 어디서 멈췄는지 모르는데 무엇을 되돌린다는 말이 성립하지 않기 때문입니다.
+
+### 조정자를 둔다는 것
+
+**오케스트레이션(orchestration)** 은 다음 단계를 결정하는 주체를 한 곳에 모으는 방식입니다. 그 조정자를 오케스트레이터라고 부릅니다.
+
+흔한 오해가 하나 있습니다. 오케스트레이션의 정의는 **"다음 단계를 결정하는 주체가 하나인가"** 이지, 그 주체가 별도 프로세스인가가 아닙니다. 이 프로젝트는 조정자를 새 서비스로 분리하지 않고 `order-service` 안의 `OrderSagaOrchestrator` 클래스 하나로 두었습니다. 그렇게 하면 Saga 상태와 주문 상태가 **같은 DB**에 있게 되어, "단계를 옮기는 쓰기"와 "주문 상태를 바꾸는 쓰기"를 한 트랜잭션으로 묶을 수 있습니다. 조정자를 떼어내면 이 둘이 다른 DB로 갈라져, 서로 어긋난 상태를 따로 다뤄야 합니다.
+
+조정자를 별도 서비스로 분리할 실익은 **여러 종류의 Saga가 생겨 조정 로직 자체가 하나의 관심사가 될 때** 나타납니다.
+
+### 사실(event)과 지시(command)
+
+바뀐 것은 메시지의 성격입니다.
+
+| | 코레오그래피 | 오케스트레이션 |
+|---|---|---|
+| 메시지 | `OrderCreated` — **사실** | `RESERVE` / `CHARGE` — **지시** |
+| 판단하는 쪽 | 듣는 쪽 | 보내는 쪽 |
+| 참여자가 아는 것 | 자기 앞에 무슨 일이 있었는지 | 없음 |
+
+"주문이 생겼다"는 사실을 들은 서비스는 그것으로 무엇을 할지 **스스로** 정합니다. "재고를 잡아라"라는 지시를 받은 서비스는 이미 정해진 일을 할 뿐입니다.
+
+그래서 지금의 `product-service`는 자기 다음에 결제 단계가 있다는 사실을 모르고, `payment-service`는 앞에 재고 단계가 있었다는 사실을 모릅니다. **단계를 끼워 넣거나 순서를 바꿔도 참여자 코드는 건드리지 않습니다.**
+
+### 실행과 보상을 같은 토픽에 담는 이유
+
+이번 Phase에서 단계를 둘로 늘렸습니다. 재고 확보 다음에 결제가 옵니다. 결제가 실패하면 이미 잡아 둔 재고를 **되돌리라고 지시**해야 합니다. 여기서 처음으로 다른 서비스를 향한 보상 명령이 등장합니다.
+
+토픽은 셋입니다.
+
+| 토픽 | 방향 | 실리는 것 |
+|---|---|---|
+| `stock-command` | 오케스트레이터 → product | `RESERVE`, `RELEASE` |
+| `payment-command` | 오케스트레이터 → payment | `CHARGE` |
+| `saga-reply` | 참여자 전체 → 오케스트레이터 | 처리 결과 |
+
+`RESERVE`와 `RELEASE`를 **같은 토픽**에 담은 것이 요점입니다. Kafka는 같은 토픽의 **같은 파티션 안에서만** 순서를 보장합니다. 토픽을 나누면 "되돌려라"가 "잡아라"를 추월할 수 있고, 그 경합을 애플리케이션이 직접 막아야 합니다.
+
+여기에 조건이 하나 더 붙습니다. 같은 토픽이어도 파티션이 여러 개면 메시지가 흩어집니다. 그래서 발행할 때 **`orderId`를 메시지 키로** 지정합니다. Kafka는 같은 키를 같은 파티션에 넣으므로, 한 주문의 명령들은 보낸 순서 그대로 도착합니다.
+
+```java
+kafkaTemplate.send(StockCommand.TOPIC, String.valueOf(order.getId()), command);
+```
+
+### 상태 머신
+
+오케스트레이터는 각 주문의 진행 단계를 `OrderSaga` 테이블에 기록합니다.
+
+```mermaid
+stateDiagram-v2
+    [*] --> RESERVING_STOCK: 주문 접수
+    RESERVING_STOCK --> CHARGING_PAYMENT: RESERVE 성공
+    RESERVING_STOCK --> FAILED: RESERVE 실패
+    CHARGING_PAYMENT --> COMPLETED: CHARGE 성공
+    CHARGING_PAYMENT --> COMPENSATING_STOCK: CHARGE 실패
+    COMPENSATING_STOCK --> FAILED: RELEASE 완료
+    COMPLETED --> [*]
+    FAILED --> [*]
+```
+
+**완료한 단계의 목록을 따로 저장하지 않습니다.** 단계가 선형이므로 "지금 어느 단계인가" 하나만 알면 되돌릴 대상이 결정됩니다. `CHARGING_PAYMENT`에서 실패했다면 그보다 앞선 단계는 재고 확보뿐입니다. 분기하거나 병렬로 갈라지는 Saga라면 완료 목록이 필요해지지만, 그때 도입하면 됩니다.
+
+각 단계는 **자기가 어떤 응답을 기다리는지**를 함께 들고 있습니다.
+
+```java
+enum SagaStep {
+    RESERVING_STOCK("RESERVE"),
+    CHARGING_PAYMENT("CHARGE"),
+    COMPENSATING_STOCK("RELEASE"),
+    COMPLETED(null),      // 더 기다릴 응답이 없다
+    FAILED(null);
+```
+
+응답이 도착하면 이 값으로 "지금 기다리던 것이 맞는가"를 먼저 확인하고, 어긋나면 버립니다. 이 검사가 없으면 뒤에서 볼 문제가 생깁니다.
+
+### 진행 상태를 모으면 무엇이 가능해지는가
+
+10절에서 손댈 수 없다고 남겨 두었던 타임아웃이 이제 가능해집니다. `SagaTimeoutSweeper`가 10초마다, 30초 넘게 응답 없이 머문 Saga를 찾습니다.
+
+```java
+List<OrderSaga> stalled = sagas.findByStepInAndUpdatedAtBefore(SagaStep.waiting(), deadline);
+```
+
+멈춘 단계에 따라 처리가 갈립니다.
+
+1. `RESERVING_STOCK`에서 멈춤 → 되돌릴 앞 단계가 없으므로 주문만 취소합니다.
+2. `CHARGING_PAYMENT`에서 멈춤 → 재고가 이미 잡혀 있으므로 `RELEASE`를 보냅니다.
+3. `COMPENSATING_STOCK`에서 멈춤 → `RELEASE`를 다시 보냅니다.
+
+3번에는 재시도 횟수 상한이 없습니다. **보상을 포기하면 재고가 영영 묶인 채 남기 때문입니다.** 참여자 쪽이 멱등하므로 여러 번 보내도 안전합니다.
+
+이 기능의 존재 자체가 오케스트레이션이 무엇을 사는지 보여 줍니다. 진행 상태가 한 테이블에 모였기 때문에 비로소 "어디서 멈췄는가"를 질의할 수 있습니다.
+
+### 타임아웃은 실패가 아니라 "모름"이다
+
+여기서 실제로 확인하다 드러난 구멍이 하나 있습니다. 이 프로젝트에서 가장 값진 발견이므로 그대로 남깁니다.
+
+타임아웃으로 주문을 취소하고 재고까지 되돌린 뒤, 멈춰 있던 `payment-service`를 다시 띄웠습니다. 그러자 밀려 있던 `CHARGE` 명령이 **실제로 처리됐습니다.**
+
+```
+order   | 어긋난 응답이라 버린다: orderId=4, 현재단계=FAILED, 응답=CHARGE
+payment | 결제 완료: userId=1, 청구액=90000.00, 남은잔액=910000.00 (orderId=4)
+```
+
+주문은 `CANCELLED`인데 **돈은 빠져나갔습니다.** 오케스트레이터가 늦은 응답을 버린 것은 상태 관리로서 옳습니다. 그러나 응답을 버리는 것과 **참여자 쪽에서 이미 일어난 부작용을 되돌리는 것은 다른 일**입니다.
+
+설계 단계에서는 결제에 대응하는 보상(`REFUND`)을 범위에서 뺐습니다. 근거는 "결제가 마지막 단계라 그 뒤에 실패할 단계가 없어 호출될 경로가 없다"였습니다. **이 근거가 틀렸습니다.** 타임아웃 경로가 정확히 그 경로를 만듭니다.
+
+분산 시스템의 대표적인 함정이 이것입니다.
+
+> **응답이 없다는 것은 상대가 일을 하지 않았다는 뜻이 아니라, 했는지 안 했는지 알 수 없다는 뜻입니다.**
+
+타임아웃을 실패로 단정하는 순간 이런 어긋남이 생깁니다. 해법은 둘 중 하나입니다.
+
+- 이미 끝난 Saga에 늦은 **성공** 응답이 도착하면 버리지 말고, 그 단계의 보상을 발행합니다.
+- 보상을 시작하기 전에 참여자에게 "그 주문 처리했습니까"를 되묻습니다.
+
+둘 다 이번 범위 밖으로 두었습니다. 고쳐 버리면 이 교훈이 코드 안에 숨기 때문입니다.
+
+### 대가
+
+오케스트레이션이 공짜는 아닙니다.
+
+**참여자를 추가하면, 참여자 코드는 그대로여도 오케스트레이터는 반드시 바뀝니다.** 흐름을 아는 곳이 거기 하나뿐이기 때문입니다. 코레오그래피에서는 새 서비스가 관심 있는 이벤트를 구독하기만 하면 기존 코드를 건드릴 일이 없었습니다.
+
+| | 코레오그래피 | 오케스트레이션 |
+|---|---|---|
+| 흐름을 읽으려면 | 모든 리스너를 모아 봐야 함 | 한 클래스만 보면 됨 |
+| 참여자를 추가하면 | 새 구독만 추가 | 조정자를 반드시 수정 |
+| 진행 상태 | 아무도 모름 | 한 테이블에 모임 |
+| 결합 | 이벤트 이름에 느슨하게 | 조정자가 참여자 전부를 앎 |
+
+어느 한쪽이 늘 나은 것이 아니라 **어디를 고치게 될 것인가의 선택**입니다. 참여자가 둘셋이고 흐름이 단순하면 코레오그래피의 느슨함이 유리하고, 단계가 늘고 "지금 어디까지 갔는지"를 물어야 할 일이 생기면 조정자를 두는 편이 낫습니다.
+
+이 절의 대가 역시 13절의 문장으로 모입니다. 조정자는 **나누었기 때문에 흩어진 흐름**을 다시 한 곳으로 모으려고 존재합니다.
+
+### 실측
+
+`docker compose up -d --build` 상태에서 확인한 결과입니다.
+
+**결제 실패 시 보상.** 모니터(320,000원) 4개를 주문하면 1,280,000원이 되어 잔액을 넘습니다. 재고 12개는 충분하므로 1단계는 통과하고 결제에서만 실패합니다.
+
+```
+보상 전 재고: 12
+{"id":3,"totalPrice":1280000.00,"status":"PENDING"}
+보상 후 재고: 12
+{"id":3,"status":"CANCELLED","cancelReason":"잔액 부족 (청구 1280000.00, 잔액 733000.00)"}
+```
+
+세 서비스의 로그를 시간순으로 모으면 보상 체인이 그대로 보입니다.
+
+```
+order   | 재고 확보 완료. 결제를 요청한다: orderId=3
+product | 재고 차감: productId=2, 주문수량=4, 남은재고=8 (orderId=3)
+payment | 잔액 부족: userId=1, 청구액=1280000.00, 잔액=733000.00 (orderId=3)
+order   | 보상 개시. 재고 복구를 요청한다: orderId=3, 사유=잔액 부족 (청구 1280000.00, 잔액 733000.00)
+product | 재고 복구(보상): productId=2, 복구수량=4, 현재재고=12 (orderId=3)
+order   | 주문 취소: orderId=3, 사유=잔액 부족 (청구 1280000.00, 잔액 733000.00)
+```
+
+잔액이 100만 원이 아니라 733,000원인 것은 앞선 주문 267,000원이 실제로 결제됐기 때문입니다.
+
+**타임아웃 보상.** `payment-service`를 멈춘 채 주문하면 30초 뒤 스위퍼가 걷어냅니다.
+
+```
+order | 응답이 없는 사가 1건을 처리한다 (임계 PT30S)
+order | 보상 개시. 재고 복구를 요청한다: orderId=4, 사유=결제 응답이 없어 주문을 취소했습니다
+order | 주문 취소: orderId=4, 사유=결제 응답이 없어 주문을 취소했습니다
+```
+
+**멱등.** 멱등 키를 `(orderId, action)` 조합으로 두었으므로 `RESERVE`와 `RELEASE`가 서로를 막지 않습니다. 키가 `orderId` 단독이었다면 보상이 "이미 처리함"으로 무시되어 재고가 영영 복구되지 않습니다.
+
+```
+차감 전 재고: 27
+RESERVE 3회 후 재고: 22      (15 가 아니라 5 만 줄었다)
+RELEASE 2회 후 재고: 27      (한 번만 복구)
+```
+
+---
+
+## 12. 한 요청의 전 생애
 
 지금까지의 조각을 하나로 잇습니다. `POST /api/orders` 한 번에 벌어지는 일 전부입니다.
 
@@ -1055,8 +1259,9 @@ sequenceDiagram
     participant C as client
     participant G as api-gateway
     participant E as Eureka
-    participant O as order-service
+    participant O as order-service<br/>(Orchestrator)
     participant P as product-service
+    participant Y as payment-service
     participant K as Kafka
     participant Z as Zipkin
 
@@ -1075,37 +1280,48 @@ sequenceDiagram
     O->>P: GET /products/1 + trace id
     P-->>O: {price: 89000}
 
-    O->>O: totalPrice 계산, 주문 저장 (PENDING)
-    O->>K: OrderCreatedEvent 발행 + trace id
+    O->>O: totalPrice 계산, 주문 저장 (PENDING)<br/>+ Saga 저장 (RESERVING_STOCK)
+    O->>K: stock-command {RESERVE} + trace id
     O-->>G: 201 Created
     G-->>C: 201 {totalPrice: 356000}
 
-    Note over C: 여기서 응답 완료. 재고는 아직 그대로.
+    Note over C: 여기서 응답 완료. 재고도 결제도 아직 그대로.
 
-    K->>P: 이벤트 전달 + trace id
+    K->>P: 명령 전달 + trace id
     P->>P: 재고 차감
-    P->>K: StockResultEvent
-    K->>O: 결과 전달
-    O->>O: 주문 확정 (CONFIRMED)
+    P->>K: saga-reply {RESERVE, ok}
+    K->>O: 응답 전달
+    O->>O: Saga → CHARGING_PAYMENT
+    O->>K: payment-command {CHARGE}
+    K->>Y: 명령 전달 + trace id
+    Y->>Y: 잔액 차감
+    Y->>K: saga-reply {CHARGE, ok}
+    K->>O: 응답 전달
+    O->>O: Saga → COMPLETED, 주문 확정 (CONFIRMED)
 
     G-->>Z: span
     O-->>Z: span
     P-->>Z: span
+    Y-->>Z: span
 ```
 
-**14번에서 클라이언트는 이미 응답을 받았고, 재고 차감(15~16번)은 그 뒤에 일어납니다.** 동기와 비동기의 경계가 이 지점입니다. 17~19번의 span 전송도 응답 이후이므로, 추적을 켠다고 해서 사용자가 기다리는 시간이 늘지는 않습니다.
+**14번에서 클라이언트는 이미 응답을 받았고, 재고 차감과 결제(15번 이후)는 그 뒤에 일어납니다.** 동기와 비동기의 경계가 이 지점입니다. 마지막 span 전송도 응답 이후이므로, 추적을 켠다고 해서 사용자가 기다리는 시간이 늘지는 않습니다.
+
+이 다이어그램에서 눈여겨볼 것은 **Kafka를 오가는 화살표가 전부 order-service를 한 번씩 거친다**는 점입니다. 코레오그래피였다면 `product-service`가 `payment-service`에게 직접 넘겼을 자리에 조정자가 한 번 더 끼어듭니다. 왕복이 늘어나는 대신, 그 지점마다 진행 상태가 기록되어 어디서 멈췄는지 알 수 있게 됩니다.
 
 ---
 
-## 12. 이 프로젝트가 다루지 않은 것
+## 13. 이 프로젝트가 다루지 않은 것
 
 학습 범위를 좁히기 위해 의도적으로 제외한 것들입니다. 실무로 넘어갈 때 이어서 볼 주제입니다.
 
 | 주제 | 왜 제외했는가 | 언제 필요한가 |
 |---|---|---|
-| 중앙 설정 관리 (Config Server) | 서비스 4개는 각자 관리해도 부담이 없음 | 설정 변경을 재배포 없이 반영해야 할 때 |
+| 중앙 설정 관리 (Config Server) | 서비스 다섯 개는 각자 관리해도 부담이 없음 | 설정 변경을 재배포 없이 반영해야 할 때 |
 | 영속 DB | 인메모리 H2로 기동 속도를 택함 | 재시작에도 데이터가 남아야 할 때 |
-| DLQ / 보상 트랜잭션 | 재고 부족 이벤트를 로그만 남기고 버림 | 실패한 이벤트를 반드시 처리해야 할 때 |
+| 늦은 성공 응답에 대한 보상 (`REFUND`) | **설계 근거가 틀렸던 항목입니다.** "결제가 마지막 단계라 보상이 호출될 경로가 없다"고 판단했으나, 11절에서 보듯 타임아웃 경로가 그 경로를 만듭니다 | 타임아웃 뒤 늦게 성공한 작업의 부작용을 되돌려야 할 때 |
+| DLQ (Dead Letter Queue) | 보상 자체가 실패하면 로그만 남기고 사람 개입에 맡김 | 실패한 메시지를 반드시 다시 처리해야 할 때 |
+| Transactional Outbox | 상태 저장과 메시지 발행이 원자적이지 않음. 타임아웃 스위퍼로 걷어내는 선에서 그침 | 메시지 유실이 업무상 허용되지 않을 때 |
 | Kubernetes | Compose로 개념 이해가 충분함 | 실제 운영 배포 |
 | 메트릭·알림 (Prometheus) | 추적만으로 흐름 이해는 가능 | 운영 중 이상 징후를 감지해야 할 때 |
 

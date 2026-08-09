@@ -1,11 +1,18 @@
 package com.example.msa.order;
 
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.context.annotation.Bean;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 // @EnableFeignClients: @FeignClient 인터페이스를 찾아 HTTP 호출 구현체를 만들어 준다.
@@ -42,5 +49,23 @@ public class OrderServiceApplication {
     @Bean
     NewTopic sagaReplyTopic() {
         return TopicBuilder.name(SagaReply.TOPIC).partitions(1).replicas(1).build();
+    }
+
+    /**
+     * {@link OutboxRelay} 전용 발행기. 값 직렬화기만 다르다.
+     *
+     * <p>기본 {@code KafkaTemplate} 은 자바 객체를 JSON 으로 바꿔 보내는
+     * {@code JsonSerializer} 를 쓴다. 그런데 outbox 에 담긴 것은 <b>이미 JSON 문자열</b>
+     * 이다. 기본 발행기로 보내면 문자열을 한 번 더 JSON 으로 감싸
+     * {@code "{\"orderId\":1}"} 처럼 나가고, 받는 쪽이 역직렬화에 실패한다.
+     *
+     * <p>그래서 값도 문자열 그대로 내보내는 발행기를 따로 둔다. 나머지 설정
+     * (부트스트랩 주소 등)은 {@code spring.kafka.*} 에서 그대로 가져온다.
+     */
+    @Bean
+    KafkaTemplate<String, String> outboxKafkaTemplate(KafkaProperties properties) {
+        Map<String, Object> config = new HashMap<>(properties.buildProducerProperties(null));
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(config));
     }
 }

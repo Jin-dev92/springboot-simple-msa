@@ -81,3 +81,9 @@ saga:
     threshold: 30s
     # 위 임계를 넘은 사가가 있는지 확인하는 주기.
     check-interval: 10s
+
+outbox:
+  # outbox 테이블에 쌓인 메시지를 내보내는 주기.
+  # 이 값이 곧 발행 지연의 상한이다. 짧게 잡을수록 지연은 줄지만 빈 조회가 늘어난다.
+  # 폴링 대신 CDC 를 쓰면 이 트레이드오프 자체가 사라진다.
+  poll-interval: 1s

@@ -26,6 +26,7 @@ Spring Boot 기반 마이크로서비스 아키텍처(MSA)를 **인프라 관점
 | 한 트랜잭션으로 묶을 수 없는 일을 어떻게 되돌리는가 | Saga 보상 트랜잭션 | [10절](docs/msa-learning-note.md#10-saga--롤백할-수-없을-때-되돌리는-법) |
 | 흐름이 여러 서비스에 흩어져 어디서 멈췄는지 모르는 것 | Saga 오케스트레이션 | [11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기) |
 | DB를 나눠 조인이 사라진 것 | 거래 시점 값 복제 + 조인 대안 여섯 가지 | [12절](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것) |
+| DB 커밋과 메시지 발행이 원자적이지 않은 것 | Transactional Outbox | [13절](docs/msa-learning-note.md#13-transactional-outbox--커밋과-발행을-하나로-묶기) |
 | 여러 개를 어떻게 한 번에 띄우는가 | Docker Compose | [부록 A](docs/msa-learning-note.md#부록-a-컨테이너로-묶을-때-부딪히는-것들) |
 
 ---
@@ -42,7 +43,7 @@ flowchart TB
     subgraph apps ["애플리케이션 서비스"]
         gateway["api-gateway<br/>Spring Cloud Gateway<br/>:8080"]
         auth["auth-service<br/>H2 · 랜덤 포트"]
-        order["<b>order-service · Saga Orchestrator</b><br/>주문 + Saga 진행 상태 · H2<br/>타임아웃 스위퍼 (30초)"]
+        order["<b>order-service · Saga Orchestrator</b><br/>주문 + Saga 진행 상태 + outbox · H2<br/>타임아웃 스위퍼 (30초) · Outbox 릴레이 (1초)"]
         product["product-service<br/>H2 · 랜덤 포트"]
         payment["payment-service<br/>H2 · 랜덤 포트<br/>HTTP 엔드포인트 없음"]
     end
@@ -77,6 +78,8 @@ flowchart TB
 
 ②나 ④가 오지 않으면 타임아웃 스위퍼가 30초 뒤 ⑤를 대신 발행합니다. 이것이 가능한 이유는 진행 상태가 order-service의 DB 한 곳에 모여 있기 때문입니다. 자세한 것은 [학습 노트 11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기)에 있습니다.
 
+**order-service가 내보내는 ①③⑤는 Kafka로 직접 가지 않습니다.** 사가 상태와 같은 트랜잭션으로 `outbox` 테이블에 먼저 쓰이고, 릴레이가 꺼내 발행합니다. 그래서 **Kafka가 죽어 있어도 주문은 정상 접수**됩니다([13절](docs/msa-learning-note.md#13-transactional-outbox--커밋과-발행을-하나로-묶기)). 참여자의 ②④는 아직 리스너에서 직접 발행합니다.
+
 ### 모듈
 
 | 모듈 | 포트 | 역할 |
@@ -99,6 +102,7 @@ AppUser { id, username, password(BCrypt), role }
 Product { id, name, price, stock }
 Account { userId, balance }
 Order   { id, userId, productId, productName, quantity, totalPrice, status, cancelReason }
+Outbox  { id, topic, messageKey, payload, createdAt, publishedAt }   # order-service 내부
 ```
 
 | 엔드포인트 | 권한 |
@@ -262,6 +266,15 @@ docker compose logs order-service | grep '응답이 없는 사가'
 docker compose start payment-service
 docker compose logs payment-service | grep '결제 완료'
 
+# Outbox — Kafka 가 죽어 있어도 주문이 접수되고, 살아나면 밀린 명령이 나간다
+docker compose stop kafka
+curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":1,"quantity":2}'   # 201 PENDING
+docker compose logs order-service | grep 'outbox 발행 실패'                # 릴레이가 재시도 중
+docker compose start kafka
+sleep 20
+curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"  # CONFIRMED
+
 # 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do
   echo '{"orderId":777,"productId":1,"quantity":5,"action":"RESERVE"}' | \
@@ -303,8 +316,9 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | **7** | Saga 보상 트랜잭션 + 멱등 소비 | 재고 부족 주문이 CANCELLED로 되돌아감 + 중복 이벤트에도 재고는 한 번만 차감 |
 | **8** | Saga 오케스트레이션 전환 + payment-service | 결제 실패 시 재고가 되돌아감 + 참여자가 죽어도 30초 뒤 스스로 취소됨 |
 | **9** | 주문 스냅샷 — 주문 시점의 상품명을 `Order`에 함께 저장 | 상품명을 바꿔도 **과거 주문 내역의 상품명은 그대로** + 주문 목록 조회에 product-service 호출이 사라짐 |
+| **10** | Transactional Outbox (order-service) | **Kafka가 죽은 채로도 주문이 접수되고**, 브로커가 돌아오면 밀린 명령이 나가 정상 완료됨 |
 
-Phase 9까지 완료된 상태입니다.
+Phase 10까지 완료된 상태입니다.
 
 ### 앞으로 (예정)
 
@@ -312,14 +326,16 @@ Phase 9까지 완료된 상태입니다.
 
 | Phase | 다룰 것 | 검증 기준 |
 |---|---|---|
-| **10** | Transactional Outbox | 발행 직후 프로세스를 죽여도 **메시지가 유실되지 않음** |
 | **11** | CQRS 읽기 모델 | 비정규화된 조회 전용 저장소에서 정렬·페이징이 동작 + 이벤트 재생으로 재구축 가능 |
+| — | Outbox 를 참여자(product·payment)까지 확대 | 셋 다 같은 방식으로 발행 |
 
 **Phase 9는 성능 최적화가 아니라 도메인 정확성 문제입니다.** "상품명이 바뀌면 3년 전 주문 내역의 상품명도 함께 바뀌어야 하는가?"에 답이 '아니오'라면, 상품명은 조인해 올 값이 아니라 **거래 시점에 박제할 값**입니다. 이미 `totalPrice`를 그렇게 다루고 있습니다. MSA에서 겪는 조인 통증의 상당 부분은 **애초에 조인하면 안 되는 것을 조인하려다** 생기며, DB를 나눈 것이 그 사실을 드러냈을 뿐입니다.
 
-**Phase 10이 11보다 먼저인 데도 이유가 있습니다.** 재고는 다음 명령으로 자기 교정되지만 읽기 모델은 다릅니다 — **이벤트를 한 번 놓치면 영원히 모른 채 조용히 틀린 값을 내놓습니다.** 현재 발행 경로는 커밋 직후 죽으면 메시지를 잃으므로, Outbox 없이 읽기 모델을 올리면 그 결함을 그대로 물려받습니다.
+**Phase 10이 11보다 먼저인 데도 이유가 있습니다.** 재고는 다음 명령으로 자기 교정되지만 읽기 모델은 다릅니다 — **이벤트를 한 번 놓치면 영원히 모른 채 조용히 틀린 값을 내놓습니다.** Outbox 없이 읽기 모델을 올리면 그 결함을 그대로 물려받습니다.
 
-아직 다루지 않은 주제와 그 이유는 [학습 노트 14절](docs/msa-learning-note.md#14-이-프로젝트가-다루지-않은-것)에 있습니다.
+Phase 10은 `order-service`에만 적용했습니다. 참여자 둘은 아직 리스너에서 직접 발행하므로, 같은 패턴을 적용한 구간과 그렇지 않은 구간을 나란히 두고 비교할 수 있습니다.
+
+아직 다루지 않은 주제와 그 이유는 [학습 노트 15절](docs/msa-learning-note.md#15-이-프로젝트가-다루지-않은-것)에 있습니다.
 
 ---
 

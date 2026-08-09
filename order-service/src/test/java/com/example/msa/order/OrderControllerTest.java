@@ -61,6 +61,7 @@ class OrderControllerTest {
                                 """))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.productId").value(1))
+                .andExpect(jsonPath("$.productName").value("키보드"))
                 .andExpect(jsonPath("$.userId").value(7))
                 .andExpect(jsonPath("$.totalPrice").value(267000));
 
@@ -71,6 +72,63 @@ class OrderControllerTest {
                         command instanceof StockCommand c
                                 && c.productId() == 1L && c.quantity() == 3
                                 && c.action() == StockCommand.Action.RESERVE));
+    }
+
+    /**
+     * Phase 9 의 검증 기준. 이 테스트가 이 단계의 존재 이유다.
+     *
+     * <p>상품명을 조인해 왔다면 과거 주문이 현재 상품을 따라 움직인다. 주문 시점에
+     * 복사해 두었으므로 상품이 이름을 바꿔도 영수증은 그대로여야 한다.
+     */
+    @Test
+    void 상품명이_바뀌어도_과거_주문의_상품명은_그대로다() throws Exception {
+        given(productClient.findById(1L)).willReturn(
+                new ProductClient.ProductResponse(1L, "키보드", new BigDecimal("89000"), 30));
+
+        mockMvc.perform(asUser(post("/orders"), 42L)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"productId": 1, "quantity": 1}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.productName").value("키보드"));
+
+        // product-service 에서 상품 이름이 바뀌었다.
+        given(productClient.findById(1L)).willReturn(
+                new ProductClient.ProductResponse(1L, "무선 키보드", new BigDecimal("89000"), 30));
+
+        mockMvc.perform(asUser(get("/orders"), 42L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].productName").value("키보드"));
+    }
+
+    /**
+     * 조회 경로가 product-service 에 의존하지 않는다는 것을 확인한다.
+     *
+     * <p>Feign 클라이언트를 아예 부르지 않으므로, 주문이 N 건이든 호출은 0 회다.
+     * 조인을 없앤 것이 아니라 <b>조인할 필요 자체를 없앤 것</b>이 요점이다.
+     */
+    @Test
+    void 주문_목록_조회는_product_service_를_부르지_않는다() throws Exception {
+        given(productClient.findById(1L)).willReturn(
+                new ProductClient.ProductResponse(1L, "키보드", new BigDecimal("89000"), 30));
+
+        for (int i = 0; i < 3; i++) {
+            mockMvc.perform(asUser(post("/orders"), 43L)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"productId": 1, "quantity": 1}
+                                    """))
+                    .andExpect(status().isCreated());
+        }
+        org.mockito.Mockito.clearInvocations(productClient);
+
+        mockMvc.perform(asUser(get("/orders"), 43L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(3))
+                .andExpect(jsonPath("$[0].productName").value("키보드"));
+
+        org.mockito.Mockito.verify(productClient, org.mockito.Mockito.never()).findById(any());
     }
 
     @Test

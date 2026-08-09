@@ -85,7 +85,8 @@ class OrderController {
         ProductClient.ProductResponse product = productClient.findById(request.productId());
         BigDecimal totalPrice = product.price().multiply(BigDecimal.valueOf(request.quantity()));
         Order order = repository.save(
-                new Order(userIdOf(jwt), product.id(), request.quantity(), totalPrice));
+                new Order(userIdOf(jwt), product.id(), product.name(), request.quantity(),
+                        totalPrice));
 
         orchestrator.start(order);
         return order;

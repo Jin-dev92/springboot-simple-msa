@@ -26,6 +26,25 @@ public class Order {
     // 서비스마다 DB 가 분리되어 있으므로 DB 차원의 join 이나 제약조건은 존재할 수 없다.
     private Long productId;
 
+    /**
+     * 주문 시점의 상품 이름. product-service 에서 조회해 <b>복사해 둔다</b>.
+     *
+     * <p>조회할 때마다 product-service 에 물어보지 않기 위한 최적화처럼 보이지만,
+     * 실은 그쪽이 부차적이다. 이 값이 여기 있어야 하는 진짜 이유는 이 질문에 있다.
+     *
+     * <p><b>상품 이름이 "키보드"에서 "무선 키보드"로 바뀌면, 3년 전 주문 내역의
+     * 상품명도 함께 바뀌어야 하는가?</b> 아니다. 영수증은 거래 시점의 사실을
+     * 박제해야 한다. 조인해 오면 과거 주문이 현재 상품을 따라 움직인다.
+     *
+     * <p>바로 위의 {@code totalPrice} 도 같은 이유로 이미 복사해 두고 있었다.
+     * 가격만 박제하고 이름은 조인해 오는 것은 일관성이 없다.
+     *
+     * <p>그래서 이것은 정규화를 깨는 타협이 아니라 <b>주문 도메인이 원래 요구하던
+     * 모양</b>이다. MSA 에서 겪는 조인 통증의 상당 부분은 애초에 조인하면 안 되는
+     * 것을 조인하려다 생기며, DB 를 나눈 것이 그 사실을 드러냈을 뿐이다.
+     */
+    private String productName;
+
     private int quantity;
 
     private BigDecimal totalPrice;
@@ -47,9 +66,11 @@ public class Order {
         // JPA 기본 생성자
     }
 
-    public Order(Long userId, Long productId, int quantity, BigDecimal totalPrice) {
+    public Order(Long userId, Long productId, String productName, int quantity,
+            BigDecimal totalPrice) {
         this.userId = userId;
         this.productId = productId;
+        this.productName = productName;
         this.quantity = quantity;
         this.totalPrice = totalPrice;
         this.status = OrderStatus.PENDING;
@@ -91,6 +112,10 @@ public class Order {
 
     public Long getProductId() {
         return productId;
+    }
+
+    public String getProductName() {
+        return productName;
     }
 
     public int getQuantity() {

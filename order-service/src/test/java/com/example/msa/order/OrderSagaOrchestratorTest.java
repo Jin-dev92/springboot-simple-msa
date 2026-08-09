@@ -47,7 +47,7 @@ class OrderSagaOrchestratorTest {
 
     /** 주문을 만들고 Saga 를 시작해, 재고 응답을 기다리는 상태로 만든다. */
     private Order startedOrder() {
-        Order order = orders.save(new Order(1L, 2L, 4, new BigDecimal("1280000")));
+        Order order = orders.save(new Order(1L, 2L, "모니터", 4, new BigDecimal("1280000")));
         orchestrator.start(order);
         return order;
     }

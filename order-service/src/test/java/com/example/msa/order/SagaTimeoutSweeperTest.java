@@ -68,7 +68,7 @@ class SagaTimeoutSweeperTest {
     }
 
     private Order startedOrder() {
-        Order order = orders.save(new Order(1L, 2L, 4, new BigDecimal("1280000")));
+        Order order = orders.save(new Order(1L, 2L, "모니터", 4, new BigDecimal("1280000")));
         orchestrator.start(order);
         return order;
     }

@@ -25,6 +25,7 @@ Spring Boot 기반 마이크로서비스 아키텍처(MSA)를 **인프라 관점
 | 세션을 공유하지 않고 로그인 상태를 어떻게 아는가 | JWT 인증·인가 (Spring Security) | [9절](docs/msa-learning-note.md#9-인증인가--세션-없이-로그인-상태를-다루기) |
 | 한 트랜잭션으로 묶을 수 없는 일을 어떻게 되돌리는가 | Saga 보상 트랜잭션 | [10절](docs/msa-learning-note.md#10-saga--롤백할-수-없을-때-되돌리는-법) |
 | 흐름이 여러 서비스에 흩어져 어디서 멈췄는지 모르는 것 | Saga 오케스트레이션 | [11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기) |
+| DB를 나눠 조인이 사라진 것 | 거래 시점 값 복제 (스냅샷) | [12절](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것) |
 | 여러 개를 어떻게 한 번에 띄우는가 | Docker Compose | [부록 A](docs/msa-learning-note.md#부록-a-컨테이너로-묶을-때-부딪히는-것들) |
 
 ---
@@ -97,7 +98,7 @@ flowchart TB
 AppUser { id, username, password(BCrypt), role }
 Product { id, name, price, stock }
 Account { userId, balance }
-Order   { id, userId, productId, quantity, totalPrice, status, cancelReason }
+Order   { id, userId, productId, productName, quantity, totalPrice, status, cancelReason }
 ```
 
 | 엔드포인트 | 권한 |
@@ -301,8 +302,9 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | **6** | JWT 인증·인가 (auth-service, RBAC) | 토큰 없이 401, 권한 부족 시 403, 남의 주문 조회 불가 |
 | **7** | Saga 보상 트랜잭션 + 멱등 소비 | 재고 부족 주문이 CANCELLED로 되돌아감 + 중복 이벤트에도 재고는 한 번만 차감 |
 | **8** | Saga 오케스트레이션 전환 + payment-service | 결제 실패 시 재고가 되돌아감 + 참여자가 죽어도 30초 뒤 스스로 취소됨 |
+| **9** | 주문 스냅샷 — 주문 시점의 상품명을 `Order`에 함께 저장 | 상품명을 바꿔도 **과거 주문 내역의 상품명은 그대로** + 주문 목록 조회에 product-service 호출이 사라짐 |
 
-Phase 8까지 완료된 상태입니다.
+Phase 9까지 완료된 상태입니다.
 
 ### 앞으로 (예정)
 
@@ -310,7 +312,6 @@ Phase 8까지 완료된 상태입니다.
 
 | Phase | 다룰 것 | 검증 기준 |
 |---|---|---|
-| **9** | 주문 스냅샷 — 주문 시점의 상품명을 `Order`에 함께 저장 | 상품명을 바꿔도 **과거 주문 내역의 상품명은 그대로** + 주문 목록 조회에 product-service 호출이 사라짐 |
 | **10** | Transactional Outbox | 발행 직후 프로세스를 죽여도 **메시지가 유실되지 않음** |
 | **11** | CQRS 읽기 모델 | 비정규화된 조회 전용 저장소에서 정렬·페이징이 동작 + 이벤트 재생으로 재구축 가능 |
 
@@ -318,7 +319,7 @@ Phase 8까지 완료된 상태입니다.
 
 **Phase 10이 11보다 먼저인 데도 이유가 있습니다.** 재고는 다음 명령으로 자기 교정되지만 읽기 모델은 다릅니다 — **이벤트를 한 번 놓치면 영원히 모른 채 조용히 틀린 값을 내놓습니다.** 현재 발행 경로는 커밋 직후 죽으면 메시지를 잃으므로, Outbox 없이 읽기 모델을 올리면 그 결함을 그대로 물려받습니다.
 
-아직 다루지 않은 주제와 그 이유는 [학습 노트 13절](docs/msa-learning-note.md#13-이-프로젝트가-다루지-않은-것)에 있습니다.
+아직 다루지 않은 주제와 그 이유는 [학습 노트 14절](docs/msa-learning-note.md#14-이-프로젝트가-다루지-않은-것)에 있습니다.
 
 ---
 

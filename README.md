@@ -146,7 +146,8 @@ curl -s -X POST http://localhost:8080/api/orders \
   -d '{"productId": 1, "quantity": 3}'
 # {"id":1,...,"totalPrice":267000.00,"status":"PENDING"}
 
-# 잠시 뒤 다시 조회하면 CONFIRMED 로 바뀌어 있다
+# 응답은 PENDING 이다. 재고 확보와 결제가 그 뒤에 순서대로 일어난다.
+# 잠시 뒤 다시 조회하면 CONFIRMED 로 바뀌어 있다.
 curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -246,7 +247,11 @@ curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKE
   -H 'Content-Type: application/json' -d '{"productId":3,"quantity":2}'
 sleep 45
 docker compose logs order-service | grep '응답이 없는 사가'
-docker compose start payment-service  # 재시작이 바로 학습 노트 11절의 REFUND 구멍을 재현한다 — 밀려 있던 CHARGE 가 CANCELLED 된 주문에서 실제로 돈을 뺀다
+
+# 아래 재시작이 학습 노트 11절의 REFUND 구멍을 그대로 재현한다.
+# 밀려 있던 CHARGE 가 이미 CANCELLED 된 주문에서 실제로 돈을 빼 간다.
+docker compose start payment-service
+docker compose logs payment-service | grep '결제 완료'
 
 # 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do
@@ -276,7 +281,7 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 
 ## 단계별 로드맵
 
-한 번에 전부 만들지 않고, 단계마다 **"이게 왜 필요한가"를 체감한 뒤 다음을 얹었습니다.** 각 단계는 커밋 하나에 대응합니다.
+한 번에 전부 만들지 않고, 단계마다 **"이게 왜 필요한가"를 체감한 뒤 다음을 얹었습니다.** Phase 1~7은 각각 커밋 하나에 대응하고, Phase 8은 참여 서비스가 늘어 여러 커밋에 걸쳐 있습니다.
 
 | Phase | 추가한 것 | 검증 기준 |
 |---|---|---|
@@ -336,5 +341,6 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | 서명 알고리즘 | HS256 (대칭키) — 검증만 하는 서비스도 토큰을 발급할 수 있음 | RS256 (비대칭키) |
 | 토큰 만료·로그아웃 | 1시간 만료, 갱신·무효화 수단 없음 | 짧은 액세스 토큰 + 리프레시 토큰 |
 | 서비스 간 통신 | 평문 HTTP | mTLS 또는 서비스 메시 |
+| 타임아웃 뒤 늦은 결제 | 취소된 주문인데 **돈이 빠져나갑니다.** 늦게 도착한 성공 응답을 버리기만 하고 `REFUND`를 보내지 않습니다 | 늦은 성공 응답에 보상을 발행하거나, 보상 전에 참여자에게 처리 여부를 되묻기 |
 
 `JWT_SECRET=... docker compose up`으로 덮어쓸 수 있습니다. 자세한 논의는 [학습 노트 9절](docs/msa-learning-note.md#9-인증인가--세션-없이-로그인-상태를-다루기)에 있습니다.

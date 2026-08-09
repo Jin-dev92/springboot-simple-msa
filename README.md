@@ -41,9 +41,9 @@ flowchart TB
     subgraph apps ["애플리케이션 서비스"]
         gateway["api-gateway<br/>Spring Cloud Gateway<br/>:8080"]
         auth["auth-service<br/>H2 · 랜덤 포트"]
-        order["order-service<br/>Saga Orchestrator<br/>H2 · 랜덤 포트"]
+        order["<b>order-service · Saga Orchestrator</b><br/>주문 + Saga 진행 상태 · H2<br/>타임아웃 스위퍼 (30초)"]
         product["product-service<br/>H2 · 랜덤 포트"]
-        payment["payment-service<br/>H2 · 랜덤 포트"]
+        payment["payment-service<br/>H2 · 랜덤 포트<br/>HTTP 엔드포인트 없음"]
     end
 
     client -->|"HTTP :8080<br/>Bearer 토큰"| gateway
@@ -52,21 +52,29 @@ flowchart TB
     gateway -->|"/api/products/**"| product
     order -->|"OpenFeign · 동기<br/>가격 조회"| product
 
-    order ==>|"stock-command<br/>RESERVE / RELEASE"| kafka
-    order ==>|"payment-command<br/>CHARGE"| kafka
-    kafka ==> product
-    kafka ==> payment
-    product ==>|"saga-reply"| kafka
-    payment ==>|"saga-reply"| kafka
-    kafka ==>|"saga-reply"| order
+    order ==>|"① stock-command<br/>RESERVE"| kafka
+    kafka ==>|"①"| product
+    product ==>|"② saga-reply"| kafka
+    kafka ==>|"②"| order
+
+    order ==>|"③ payment-command<br/>CHARGE"| kafka
+    kafka ==>|"③"| payment
+    payment ==>|"④ saga-reply"| kafka
+    kafka ==>|"④"| order
+
+    order ==>|"⑤ stock-command · RELEASE<br/>③④가 실패했을 때만"| kafka
 
     apps -.->|"등록 / 조회"| eureka
     apps -.->|"span 전송"| zipkin
 ```
 
 - 얇은 실선: 응답을 기다리는 **동기** 호출
-- 굵은 실선: 응답을 기다리지 않는 **비동기** 이벤트
+- 굵은 실선: 응답을 기다리지 않는 **비동기 명령·응답**
 - 점선: Eureka 등록·조회와 Zipkin span 전송
+
+**번호가 요점입니다.** ③은 ②가 도착한 뒤에 나갑니다. 오케스트레이터가 한 단계씩 결과를 보고 다음을 정하기 때문입니다. 그래서 아래로 향하는 화살표가 **전부 order-service에서 나갑니다** — `product-service`는 자기 다음에 결제가 있다는 것을 모르고, `payment-service`는 앞에 재고 단계가 있었다는 것을 모릅니다.
+
+②나 ④가 오지 않으면 타임아웃 스위퍼가 30초 뒤 ⑤를 대신 발행합니다. 이것이 가능한 이유는 진행 상태가 order-service의 DB 한 곳에 모여 있기 때문입니다. 자세한 것은 [학습 노트 11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기)에 있습니다.
 
 ### 모듈
 

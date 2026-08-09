@@ -52,7 +52,7 @@ flowchart TB
     subgraph net ["Docker Compose 네트워크"]
         gateway["api-gateway<br/>:8080 · 외부 공개"]
         auth["auth-service<br/>랜덤 포트 · 비공개"]
-        order["order-service<br/>랜덤 포트 · 비공개<br/>Saga Orchestrator"]
+        order["order-service<br/>랜덤 포트 · 비공개<br/><b>Saga Orchestrator</b><br/>주문 + Saga 진행 상태"]
         product["product-service<br/>랜덤 포트 · 비공개"]
         payment["payment-service<br/>랜덤 포트 · 비공개"]
         eureka[("discovery-server<br/>:8761 · 외부 공개")]
@@ -65,10 +65,10 @@ flowchart TB
     gateway --> order
     gateway --> product
     order --> product
-    order ==>|"stock-command"| kafka
-    order ==>|"payment-command"| kafka
-    kafka ==> product
-    kafka ==> payment
+    order ==>|"stock-command<br/>RESERVE / RELEASE"| kafka
+    order ==>|"payment-command<br/>CHARGE"| kafka
+    kafka ==>|"stock-command"| product
+    kafka ==>|"payment-command"| payment
     product ==>|"saga-reply"| kafka
     payment ==>|"saga-reply"| kafka
     kafka ==>|"saga-reply"| order
@@ -88,7 +88,7 @@ flowchart TB
 
 **외부에 열린 포트는 셋뿐입니다.** 8080(게이트웨이), 8761(Eureka 대시보드), 9411(Zipkin UI). auth-service, order-service, product-service, payment-service는 호스트 포트를 갖지 않으므로 외부에서 직접 부를 방법이 없습니다. 게이트웨이를 우회할 수 없는 구조가 설정으로 강제되어 있습니다.
 
-Kafka를 오가는 굵은 화살표가 전부 order-service를 거치는 것이 이 구성의 특징입니다. 왜 그런 모양이 되었는지는 11절에서 다룹니다.
+Kafka를 오가는 굵은 화살표가 전부 order-service를 거치는 것이 이 구성의 특징입니다. **두 명령이 동시에 나가는 것은 아닙니다.** 재고 응답을 받은 뒤에야 결제 명령이 나갑니다. 이 그림은 무엇이 무엇과 통신하는지만 보여 주며, 순서와 그 이유는 11절에서 다룹니다.
 
 ### 코드 지도
 

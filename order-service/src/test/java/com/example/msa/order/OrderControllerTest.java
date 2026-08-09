@@ -27,7 +27,8 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
         "management.tracing.enabled=false",
-        "spring.kafka.admin.auto-create=false"
+        "spring.kafka.admin.auto-create=false",
+        "saga.timeout.check-interval=1h"
 })
 @AutoConfigureMockMvc
 class OrderControllerTest {
@@ -64,10 +65,12 @@ class OrderControllerTest {
                 .andExpect(jsonPath("$.totalPrice").value(267000));
 
         org.mockito.Mockito.verify(kafkaTemplate).send(
-                org.mockito.ArgumentMatchers.eq(OrderCreatedEvent.TOPIC),
-                org.mockito.ArgumentMatchers.argThat(event ->
-                        event instanceof OrderCreatedEvent e
-                                && e.productId() == 1L && e.quantity() == 3));
+                org.mockito.ArgumentMatchers.eq(StockCommand.TOPIC),
+                org.mockito.ArgumentMatchers.any(String.class),
+                org.mockito.ArgumentMatchers.argThat(command ->
+                        command instanceof StockCommand c
+                                && c.productId() == 1L && c.quantity() == 3
+                                && c.action() == StockCommand.Action.RESERVE));
     }
 
     @Test

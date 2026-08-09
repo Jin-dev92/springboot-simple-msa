@@ -20,12 +20,23 @@ public class OrderServiceApplication {
      * 토픽을 코드로 선언해 둔다. Kafka 는 없는 토픽에 메시지가 오면 자동 생성해 주지만,
      * 그 설정은 운영 환경에서 대개 꺼져 있어 의존하면 안 된다.
      *
-     * <p>파티션이 1개이므로 product-service 를 여러 개 띄워도 이 토픽을 실제로 소비하는
+     * <p>파티션이 1개이므로 product-service 를 여러 개 띄워도 명령을 실제로 소비하는
      * 인스턴스는 하나뿐이다. 같은 컨슈머 그룹 안에서 하나의 파티션은 한 인스턴스에만
-     * 배정되기 때문이다. 소비까지 나누고 싶다면 파티션 수를 늘려야 한다.
+     * 배정되기 때문이다. 소비까지 나누려면 파티션 수를 늘리고, 그때도 <b>같은 주문의
+     * 명령은 같은 파티션에 가야</b> 하므로 메시지 키를 orderId 로 두는 것이 전제가 된다.
      */
     @Bean
-    NewTopic orderCreatedTopic() {
-        return TopicBuilder.name(OrderCreatedEvent.TOPIC).partitions(1).replicas(1).build();
+    NewTopic stockCommandTopic() {
+        return TopicBuilder.name(StockCommand.TOPIC).partitions(1).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic paymentCommandTopic() {
+        return TopicBuilder.name(PaymentCommand.TOPIC).partitions(1).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic sagaReplyTopic() {
+        return TopicBuilder.name(SagaReply.TOPIC).partitions(1).replicas(1).build();
     }
 }

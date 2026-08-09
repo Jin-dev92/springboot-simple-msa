@@ -31,7 +31,7 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
-        spring.json.value.default.type: com.example.msa.order.StockResultEvent
+        spring.json.value.default.type: com.example.msa.order.SagaReply
         spring.json.trusted.packages: com.example.msa.order
     listener:
       observation-enabled: true

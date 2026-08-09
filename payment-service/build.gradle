@@ -1,0 +1,12 @@
+dependencies {
+    // HTTP 엔드포인트는 없지만 웹 서버는 띄운다. Eureka 등록과 헬스체크에 필요하다.
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
+    implementation 'org.springframework.kafka:spring-kafka'
+    // 분산 추적: Kafka 헤더로 넘어온 trace id 를 이어받아 Zipkin 으로 보낸다.
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-tracing-bridge-brave'
+    implementation 'io.zipkin.reporter2:zipkin-reporter-brave'
+    runtimeOnly 'com.h2database:h2'
+}

@@ -36,8 +36,11 @@ class OrderSagaOrchestrator {
     }
 
     /** 주문이 저장된 직후 호출된다. 첫 단계인 재고 확보를 시작한다. */
+    // public 인 이유: @Transactional 이 non-public 메서드에도 걸리는지는 스프링 버전과
+    // 프록시 방식에 따라 달라진다. 조용히 무시되면 알아채기 어려우므로 확실한 쪽을 택했다.
+    // 클래스 자체가 package-private 이라 실제 노출 범위는 그대로다.
     @Transactional
-    void start(Order order) {
+    public void start(Order order) {
         sagas.save(new OrderSaga(order.getId()));
         sendStock(order, StockCommand.Action.RESERVE);
     }
@@ -49,8 +52,9 @@ class OrderSagaOrchestrator {
      * 이미 보상에 들어갔거나 끝난 Saga 에 늦은 응답이 도착할 수 있고, 그것을 그대로
      * 반영하면 취소된 주문이 확정으로 되살아난다.
      */
+    // public 인 이유는 start 위의 주석과 같다.
     @Transactional
-    void onReply(SagaReply reply) {
+    public void onReply(SagaReply reply) {
         OrderSaga saga = sagas.findById(reply.orderId()).orElse(null);
         if (saga == null) {
             log.warn("모르는 주문의 응답을 받았다: orderId={}, action={}",
@@ -67,8 +71,11 @@ class OrderSagaOrchestrator {
             case RESERVING_STOCK -> afterReserve(saga, reply);
             case CHARGING_PAYMENT -> afterCharge(saga, reply);
             case COMPENSATING_STOCK -> afterRelease(saga, reply);
-            default -> throw new IllegalStateException(
-                    "응답을 기다리지 않는 단계인데 expects 를 통과했다: " + saga.getStep());
+            // 위의 expects 검사를 통과했다면 이 분기는 도달할 수 없다. 그래도 던지지 않고
+            // 로그만 남기는 이유: 이 메서드는 카프카 리스너 아래에서 호출되고, 예외를
+            // 던지면 롤백된 메시지가 그대로 재전달되어 무한 루프가 된다.
+            default -> log.error("응답을 기다리지 않는 단계인데 expects 를 통과했다: orderId={}, 단계={}",
+                    saga.getOrderId(), saga.getStep());
         }
     }
 
@@ -78,15 +85,20 @@ class OrderSagaOrchestrator {
      * <p>Saga 마다 별도 트랜잭션으로 돌리기 위해 스위퍼와 다른 빈에 두었다.
      * 하나가 실패해도 나머지 처리가 함께 롤백되지 않는다.
      */
+    // public 인 이유는 start 위의 주석과 같다.
     @Transactional
-    void onTimeout(Long orderId) {
+    public void onTimeout(Long orderId) {
         OrderSaga saga = sagas.findById(orderId).orElse(null);
         if (saga == null) {
             return;
         }
 
         switch (saga.getStep()) {
-            // 되돌릴 앞 단계가 없다. 바로 끝낸다.
+            // 타임아웃만으로는 "확보가 실패했다"와 "확보는 됐는데 응답만 유실됐다"를
+            // 구분할 수 없다. 그렇다고 무작정 RELEASE 를 보내면 release() 는 무조건
+            // 복구하므로, 실제로는 없던 예약을 있던 것처럼 취급해 재고가 부풀어난다.
+            // 두 선택 다 안전하지 않아, 재고가 묶일 위험 쪽을 택하고 주문을 취소한다.
+            // 근본적으로는 참여자에게 그 예약이 실제로 됐는지 되물어야 하는 문제다.
             case RESERVING_STOCK -> finish(saga, "재고 확보 응답이 없어 주문을 취소했습니다");
             // 재고는 이미 잡혀 있을 수 있으므로 반드시 되돌려야 한다.
             case CHARGING_PAYMENT -> compensate(saga, "결제 응답이 없어 주문을 취소했습니다");

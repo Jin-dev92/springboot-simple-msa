@@ -4,6 +4,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.Version;
 import java.time.Instant;
 
 /**
@@ -34,6 +35,13 @@ public class OrderSaga {
 
     /** 타임아웃 판정 기준. 단계가 바뀌거나 명령을 재발행할 때마다 갱신한다. */
     private Instant updatedAt;
+
+    /**
+     * 동시 수정 감지: 스위퍼 스레드와 응답 리스너가 같은 사가를 동시에 옮기면
+     * 나중 쓰기가 앞의 것을 덮어쓴다. 진 쪽 트랜잭션이 예외로 롤백되어 재처리된다.
+     */
+    @Version
+    private long version;
 
     protected OrderSaga() {
         // JPA 기본 생성자

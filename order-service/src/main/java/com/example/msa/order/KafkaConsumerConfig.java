@@ -7,6 +7,7 @@ import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 
@@ -28,9 +29,16 @@ import org.springframework.kafka.support.serializer.JsonDeserializer;
 @Configuration
 class KafkaConsumerConfig {
 
+    /**
+     * {@code product-changed} 를 읽는 컨슈머를 만드는 공장.
+     *
+     * <p>리스너 컨테이너와 {@link ProductReplicaRebuilder} 가 함께 쓴다. 재구축은 이
+     * 공장으로 <b>별도 컨슈머</b>를 만들어 파티션을 직접 잡고 읽으므로, 리스너의
+     * 컨슈머 그룹과 오프셋에 영향을 주지 않는다.
+     */
     @Bean
-    ConcurrentKafkaListenerContainerFactory<String, ProductChangedEvent>
-            productChangedListenerContainerFactory(KafkaProperties properties) {
+    ConsumerFactory<String, ProductChangedEvent> productChangedConsumerFactory(
+            KafkaProperties properties) {
 
         JsonDeserializer<ProductChangedEvent> valueDeserializer =
                 new JsonDeserializer<>(ProductChangedEvent.class);
@@ -48,13 +56,19 @@ class KafkaConsumerConfig {
         config.remove(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG);
         // 복제본은 처음부터 다시 쌓아야 맞으므로, 이 그룹은 토픽의 맨 앞부터 읽는다.
         config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        DefaultKafkaConsumerFactory<String, ProductChangedEvent> consumerFactory =
-                new DefaultKafkaConsumerFactory<>(config, new StringDeserializer(),
-                        valueDeserializer);
+
+        return new DefaultKafkaConsumerFactory<>(config, new StringDeserializer(),
+                valueDeserializer);
+    }
+
+    @Bean
+    ConcurrentKafkaListenerContainerFactory<String, ProductChangedEvent>
+            productChangedListenerContainerFactory(
+                    ConsumerFactory<String, ProductChangedEvent> productChangedConsumerFactory) {
 
         ConcurrentKafkaListenerContainerFactory<String, ProductChangedEvent> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(consumerFactory);
+        factory.setConsumerFactory(productChangedConsumerFactory);
         // 발신측이 실어 보낸 추적 정보를 이어받는다. 전역 리스너 설정과 맞춘다.
         factory.getContainerProperties().setObservationEnabled(true);
         return factory;

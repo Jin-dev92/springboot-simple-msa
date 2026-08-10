@@ -5,6 +5,7 @@ import javax.crypto.spec.SecretKeySpec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -29,7 +30,10 @@ class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        // 주문은 전부 인증 필요. 역할 구분은 두지 않는다.
+                        // 복제본 재구축은 운영 조작이다. 일반 사용자가 부를 일이 없고,
+                        // 토픽 전체를 다시 읽는 비용이 드므로 ADMIN 으로 제한한다.
+                        .requestMatchers(HttpMethod.POST, "/orders/admin/**").hasRole("ADMIN")
+                        // 나머지 주문 경로는 전부 인증 필요. 역할 구분은 두지 않는다.
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(jwtAuthenticationConverter())))

@@ -23,9 +23,28 @@ public class ProductServiceApplication {
         SpringApplication.run(ProductServiceApplication.class, args);
     }
 
+    /**
+     * 이 토픽은 <b>압축(compact)</b>으로 둔다. 다른 토픽들과 다른 선택이다.
+     *
+     * <p>기본 정책은 시간 기반 삭제다(기본 7일). 명령·응답 토픽은 그래도 된다 — 지나간
+     * 명령을 다시 읽을 이유가 없기 때문이다. 그런데 이 토픽은 <b>구독자가 복제본을
+     * 처음부터 다시 세우는 근거</b>다. 7일 뒤에 사라지면 재구축이 불가능해진다.
+     *
+     * <p>압축을 켜면 Kafka 가 <b>키별로 최신 메시지만</b> 남긴다. 키가 productId 이므로
+     * 상품이 3개면 메시지 3개가 영원히 남는다. 보존 기간을 무한으로 늘리는 것과 달리
+     * 저장량이 <b>상품 수</b>에 비례할 뿐 변경 횟수에 비례하지 않는다.
+     *
+     * <p>이 토픽이 "사실의 누적"이 아니라 <b>"현재 상태의 스냅샷"</b>이라 압축과 성격이
+     * 맞는다. 이벤트가 상품의 현재 모습 전체를 싣는 것(14절)이 여기서 값을 한다 —
+     * 중간 것을 버리고 최신 하나만 남겨도 복제본은 맞는 값으로 수렴한다.
+     */
     @Bean
     NewTopic productChangedTopic() {
-        return TopicBuilder.name(ProductChangedEvent.TOPIC).partitions(1).replicas(1).build();
+        return TopicBuilder.name(ProductChangedEvent.TOPIC)
+                .partitions(1)
+                .replicas(1)
+                .compact()
+                .build();
     }
 
     /**

@@ -32,7 +32,9 @@ import org.springframework.data.domain.Sort;
         // 스위퍼는 이 테스트가 만든 사가를 건드릴 수 있고,
         // 릴레이는 브로커가 없는데 발행을 시도한다.
         "saga.timeout.check-interval=1h",
-        "outbox.poll-interval=1h"
+        "outbox.poll-interval=1h",
+        // 브로커가 없으므로 기동 시 재구축을 끈다.
+        "replica.rebuild-on-startup=false"
 })
 class OrderSagaOrchestratorTest {
 

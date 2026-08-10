@@ -30,7 +30,9 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
         "management.tracing.enabled=false",
         "spring.kafka.admin.auto-create=false",
         "saga.timeout.check-interval=1h",
-        "outbox.poll-interval=1h"
+        "outbox.poll-interval=1h",
+        // 브로커가 없으므로 기동 시 재구축을 끈다.
+        "replica.rebuild-on-startup=false"
 })
 @AutoConfigureMockMvc
 class OrderControllerTest {

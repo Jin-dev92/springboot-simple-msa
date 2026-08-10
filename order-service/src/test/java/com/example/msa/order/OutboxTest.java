@@ -27,7 +27,9 @@ import org.springframework.data.domain.Sort;
         "spring.kafka.admin.auto-create=false",
         "saga.timeout.check-interval=1h",
         // 릴레이를 수동으로만 돌린다. 자동으로 돌면 브로커가 없어 실패할 뿐이다.
-        "outbox.poll-interval=1h"
+        "outbox.poll-interval=1h",
+        // 브로커가 없으므로 기동 시 재구축을 끈다.
+        "replica.rebuild-on-startup=false"
 })
 class OutboxTest {
 

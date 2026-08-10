@@ -28,6 +28,7 @@ Spring Boot 기반 마이크로서비스 아키텍처(MSA)를 **인프라 관점
 | DB를 나눠 조인이 사라진 것 | 거래 시점 값 복제 + 조인 대안 여섯 가지 | [12절](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것) |
 | DB 커밋과 메시지 발행이 원자적이지 않은 것 | Transactional Outbox | [13절](docs/msa-learning-note.md#13-transactional-outbox--커밋과-발행을-하나로-묶기) |
 | 상대의 **현재** 상태로 정렬·페이징해야 하는 것 | 참조 데이터 복제 | [14절](docs/msa-learning-note.md#14-참조-데이터-복제--남의-현재-상태로-정렬하기) |
+| 복제본이 어긋나면 스스로 못 돌아오는 것 | 이벤트 재생 재구축 + 압축 토픽 | [15절](docs/msa-learning-note.md#15-복제본-재구축--자기-교정이-없는-것을-되돌리기) |
 | 여러 개를 어떻게 한 번에 띄우는가 | Docker Compose | [부록 A](docs/msa-learning-note.md#부록-a-컨테이너로-묶을-때-부딪히는-것들) |
 
 ---
@@ -115,6 +116,7 @@ ProductReplica { productId, name, price, stock, updatedAt }         # order-serv
 | `POST /api/orders` | 인증 필요 |
 | `GET  /api/orders`, `GET /api/orders/{id}` | 인증 필요 + 본인 것만 |
 | `GET  /api/orders/summary?page=&size=` | 인증 필요 + 본인 것만. 현재 재고 적은 순 |
+| `POST /api/orders/admin/product-replica/rebuild` | ADMIN. 복제본 재구축 |
 
 초기 계정: `user`/`user123` (ROLE_USER), `admin`/`admin123` (ROLE_ADMIN)
 
@@ -292,6 +294,18 @@ curl -s "http://localhost:8080/api/orders/summary" -H "Authorization: Bearer $TO
 sleep 8
 curl -s "http://localhost:8080/api/orders/summary" -H "Authorization: Bearer $TOKEN" | jq '.content[].currentStock'   # 수렴
 
+# 복제본 재구축 — order-service 만 재시작해도 복제본이 살아난다
+docker compose restart order-service
+docker compose logs order-service | grep 재구축
+#  상품 복제본 재구축 완료: 2건
+#  복제본이 비어 있어 재구축했다: 2건
+
+# 수동 재구축 (ADMIN 만)
+ADMIN=$(curl -s -X POST http://localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | jq -r .accessToken)
+curl -s -X POST http://localhost:8080/api/orders/admin/product-replica/rebuild \
+  -H "Authorization: Bearer $ADMIN"                          # {"restored":2}
+
 # 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do
   echo '{"orderId":777,"productId":1,"quantity":5,"action":"RESERVE"}' | \
@@ -335,8 +349,9 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | **9** | 주문 스냅샷 — 주문 시점의 상품명을 `Order`에 함께 저장 | 상품명을 바꿔도 **과거 주문 내역의 상품명은 그대로** + 주문 목록 조회에 product-service 호출이 사라짐 |
 | **10** | Transactional Outbox (order-service) | **Kafka가 죽은 채로도 주문이 접수되고**, 브로커가 돌아오면 밀린 명령이 나가 정상 완료됨 |
 | **11** | 참조 데이터 복제 + product-service Outbox | 주문 목록이 **현재 재고 적은 순으로 정렬·페이징**되고, product-service가 죽어도 그 화면이 뜸 |
+| **12** | 복제본 재구축 (압축 토픽 + 기동 시 자동 + 수동 트리거) | `restart order-service` 후에도 복제본이 살아남음 |
 
-Phase 11까지 완료된 상태입니다.
+Phase 12까지 완료된 상태입니다.
 
 ### 앞으로 (예정)
 
@@ -344,7 +359,6 @@ Phase 11까지 완료된 상태입니다.
 
 | Phase | 다룰 것 | 검증 기준 |
 |---|---|---|
-| — | 복제본 재구축 | 이벤트 재생으로 `product_replica` 를 처음부터 다시 세움 |
 | — | CQRS 읽기 모델(별도 저장소) | 서비스를 가로지르는 화면이 여러 개로 늘고 조회 부하를 따로 감당해야 할 때 |
 | — | `payment-service` 까지 Outbox 확대 | 셋 다 같은 방식으로 발행 |
 
@@ -354,7 +368,7 @@ Phase 11까지 완료된 상태입니다.
 
 **Phase 11은 별도 저장소를 두는 CQRS가 아니라 로컬 복제본입니다.** 상품이 3행이고 서비스를 가로지르는 화면이 하나인 규모에서는 이쪽이 맞습니다. 기제(쓰기·읽기 모델 분리, 이벤트 동기화, 결과적 일관성, 발행 신뢰성)는 같고 다른 것은 저장 위치뿐이며, 그 판단 근거는 [학습 노트 12절의 결정 트리](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것)에 있습니다.
 
-아직 다루지 않은 주제와 그 이유는 [학습 노트 16절](docs/msa-learning-note.md#16-이-프로젝트가-다루지-않은-것)에 있습니다.
+아직 다루지 않은 주제와 그 이유는 [학습 노트 17절](docs/msa-learning-note.md#17-이-프로젝트가-다루지-않은-것)에 있습니다.
 
 ---
 

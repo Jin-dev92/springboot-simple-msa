@@ -32,7 +32,8 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
         "saga.timeout.check-interval=1h",
         "outbox.poll-interval=1h",
         // 브로커가 없으므로 기동 시 재구축을 끈다.
-        "replica.rebuild-on-startup=false"
+        "replica.rebuild-on-startup=false",
+        "replica.verify.interval=1h"
 })
 @AutoConfigureMockMvc
 class OrderControllerTest {

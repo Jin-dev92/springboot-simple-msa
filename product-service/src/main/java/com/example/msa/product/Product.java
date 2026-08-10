@@ -20,6 +20,19 @@ public class Product {
 
     private int stock;
 
+    /**
+     * 변경 순번. 이 상품이 바뀔 때마다 1씩 오른다.
+     *
+     * <p>구독자가 <b>이벤트를 놓쳤는지</b> 알아채라고 두는 값이다. 받은 순번이
+     * 자기가 아는 것보다 2 이상 크면 사이에 못 받은 것이 있다는 뜻이다.
+     *
+     * <p>JPA 의 {@code @Version}(낙관적 락)을 쓰지 않고 직접 둔 이유는 목적이 다르기
+     * 때문이다. 낙관적 락은 동시 수정을 막으려는 것이고, 이 값은 <b>구독자에게 순서를
+     * 알려 주려는</b> 것이다. 하나를 두 목적에 겹쳐 쓰면 나중에 락 전략을 바꿀 때
+     * 구독자 쪽 의미까지 흔들린다.
+     */
+    private long version;
+
     protected Product() {
         // JPA 가 리플렉션으로 인스턴스를 만들 때 사용하는 기본 생성자
     }
@@ -28,6 +41,7 @@ public class Product {
         this.name = name;
         this.price = price;
         this.stock = stock;
+        this.version = 1;
     }
 
     /**
@@ -40,6 +54,7 @@ public class Product {
             return false;
         }
         stock -= quantity;
+        version++;
         return true;
     }
 
@@ -52,6 +67,7 @@ public class Product {
      */
     public void increaseStock(int quantity) {
         stock += quantity;
+        version++;
     }
 
     public Long getId() {
@@ -68,5 +84,9 @@ public class Product {
 
     public int getStock() {
         return stock;
+    }
+
+    public long getVersion() {
+        return version;
     }
 }

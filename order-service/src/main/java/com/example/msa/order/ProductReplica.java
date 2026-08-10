@@ -42,6 +42,15 @@ public class ProductReplica {
 
     private int stock;
 
+    /**
+     * 마지막으로 반영한 원본의 변경 순번.
+     *
+     * <p>다음에 올 이벤트가 이 값 + 1 이 아니면 사이에 놓친 것이 있다는 뜻이다.
+     * 이 값보다 작거나 같으면 이미 본 것이므로 무시한다 — 중복과 순서 역전이
+     * 여기서 함께 걸러진다.
+     */
+    private long version;
+
     /** 마지막으로 갱신된 시각. 얼마나 낡았는지를 눈으로 보기 위해 남긴다. */
     private Instant updatedAt;
 
@@ -49,9 +58,9 @@ public class ProductReplica {
         // JPA 기본 생성자
     }
 
-    ProductReplica(Long productId, String name, BigDecimal price, int stock) {
+    ProductReplica(Long productId, String name, BigDecimal price, int stock, long version) {
         this.productId = productId;
-        apply(name, price, stock);
+        apply(name, price, stock, version);
     }
 
     /**
@@ -61,11 +70,28 @@ public class ProductReplica {
      * 싣고 오기 때문이다. 덮어쓰기만 하면 되므로 <b>이벤트를 몇 개 놓쳤다가 최신
      * 것 하나만 받아도 결국 맞는 값으로 수렴</b>한다.
      */
-    void apply(String name, BigDecimal price, int stock) {
+    void apply(String name, BigDecimal price, int stock, long version) {
         this.name = name;
         this.price = price;
         this.stock = stock;
+        this.version = version;
         this.updatedAt = Instant.now();
+    }
+
+    /** 이미 반영한 순번이면 무시해야 한다. 중복 전달과 순서 역전을 함께 거른다. */
+    boolean alreadyApplied(long incomingVersion) {
+        return incomingVersion <= version;
+    }
+
+    /**
+     * 이 이벤트 앞에 놓친 것이 있는가.
+     *
+     * <p>이벤트가 전체 상태를 싣기 때문에 놓쳐도 복제본 값 자체는 이것으로 맞춰진다.
+     * 그래도 <b>놓쳤다는 사실</b>은 알아야 한다. 유실이 일어나고 있다는 신호이며,
+     * 마지막 이벤트를 놓치면 다음 것이 오지 않아 영원히 낡기 때문이다.
+     */
+    boolean hasGapBefore(long incomingVersion) {
+        return incomingVersion > version + 1;
     }
 
     public Long getProductId() {
@@ -82,6 +108,10 @@ public class ProductReplica {
 
     public int getStock() {
         return stock;
+    }
+
+    public long getVersion() {
+        return version;
     }
 
     public Instant getUpdatedAt() {

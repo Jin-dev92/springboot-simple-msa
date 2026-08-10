@@ -11,7 +11,8 @@ import java.math.BigDecimal;
  * <p>명령({@link StockCommand})과 달리 이것은 <b>사실</b>이다. 보내는 쪽은 누가 듣는지
  * 모르고, 듣는 쪽이 무엇을 할지 스스로 정한다. 여기서는 복제본을 갱신한다.
  */
-public record ProductChangedEvent(Long productId, String name, BigDecimal price, int stock) {
+public record ProductChangedEvent(Long productId, String name, BigDecimal price, int stock,
+                                  long version) {
 
     static final String TOPIC = "product-changed";
 }

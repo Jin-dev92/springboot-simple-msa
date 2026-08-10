@@ -34,11 +34,32 @@ class ProductChangedListener {
             containerFactory = "productChangedListenerContainerFactory")
     @Transactional
     public void handle(ProductChangedEvent event) {
-        replicas.findById(event.productId())
-                .ifPresentOrElse(
-                        replica -> replica.apply(event.name(), event.price(), event.stock()),
-                        () -> replicas.save(new ProductReplica(event.productId(), event.name(),
-                                event.price(), event.stock())));
-        log.debug("상품 복제본 갱신: productId={}, 재고={}", event.productId(), event.stock());
+        ProductReplica replica = replicas.findById(event.productId()).orElse(null);
+        if (replica == null) {
+            replicas.save(new ProductReplica(event.productId(), event.name(), event.price(),
+                    event.stock(), event.version()));
+            log.debug("상품 복제본 생성: productId={}, version={}", event.productId(), event.version());
+            return;
+        }
+
+        if (replica.alreadyApplied(event.version())) {
+            // 중복 전달이거나 순서가 뒤바뀐 것이다. 덮어쓰면 최신 값이 옛 값으로 되돌아간다.
+            log.debug("이미 반영한 순번이라 무시: productId={}, 받은={}, 보유={}",
+                    event.productId(), event.version(), replica.getVersion());
+            return;
+        }
+
+        if (replica.hasGapBefore(event.version())) {
+            // 값 자체는 이 이벤트로 맞춰진다(전체 상태를 싣기 때문에). 그래도 유실이
+            // 일어나고 있다는 신호이므로 남긴다. 마지막 이벤트를 놓치면 다음 것이 오지
+            // 않아 영원히 낡으므로, 이 로그가 그 전조가 된다.
+            log.warn("상품 변경 이벤트를 놓쳤다: productId={}, 보유={}, 받은={} ({}건 누락)",
+                    event.productId(), replica.getVersion(), event.version(),
+                    event.version() - replica.getVersion() - 1);
+        }
+
+        replica.apply(event.name(), event.price(), event.stock(), event.version());
+        log.debug("상품 복제본 갱신: productId={}, 재고={}, version={}",
+                event.productId(), event.stock(), event.version());
     }
 }

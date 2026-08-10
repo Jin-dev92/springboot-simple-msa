@@ -72,9 +72,10 @@ class ProductReplicaRebuilder {
         // 현재 모습 전체를 싣기 때문에(14절) 중간 것을 버려도 결과가 같다.
         latest.values().forEach(event -> replicas.findById(event.productId())
                 .ifPresentOrElse(
-                        replica -> replica.apply(event.name(), event.price(), event.stock()),
+                        replica -> replica.apply(event.name(), event.price(), event.stock(),
+                                event.version()),
                         () -> replicas.save(new ProductReplica(event.productId(), event.name(),
-                                event.price(), event.stock()))));
+                                event.price(), event.stock(), event.version()))));
 
         log.info("상품 복제본 재구축 완료: {}건", latest.size());
         return latest.size();

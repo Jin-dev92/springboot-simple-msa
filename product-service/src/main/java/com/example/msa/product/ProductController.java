@@ -63,6 +63,22 @@ class ProductController {
         return saved;
     }
 
+    /**
+     * 상품 전체의 요약값. 구독자가 자기 복제본과 대조하는 데 쓴다.
+     *
+     * <p>공개 경로로 둔다. 상품 목록 자체가 이미 공개이므로 그 요약값이 새로 흘리는
+     * 정보가 없다. 대신 계산이 전체 조회를 동반하므로, 상품이 많아지면 캐시하거나
+     * 증분으로 유지해야 한다.
+     */
+    @GetMapping("/checksum")
+    ChecksumResponse checksum() {
+        List<Product> all = repository.findAll();
+        return new ChecksumResponse(all.size(), ProductChecksum.of(all));
+    }
+
+    record ChecksumResponse(int count, String checksum) {
+    }
+
     @GetMapping("/{id}")
     Product findById(@PathVariable Long id) {
         log.info("상품 조회 요청: id={}", id);

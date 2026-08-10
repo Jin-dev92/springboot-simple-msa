@@ -28,7 +28,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
         "saga.timeout.check-interval=1h",
         "outbox.poll-interval=1h",
         // 브로커가 없으므로 기동 시 재구축을 끈다.
-        "replica.rebuild-on-startup=false"
+        "replica.rebuild-on-startup=false",
+        "replica.verify.interval=1h"
 })
 class OrderSummaryTest {
 
@@ -50,14 +51,20 @@ class OrderSummaryTest {
     void 비운다() {
         orders.deleteAll();
         replicas.deleteAll();
+        versions.clear();
     }
 
     private Order order(long productId, String productName) {
         return orders.save(new Order(USER, productId, productName, 1, new BigDecimal("1000")));
     }
 
+    /** 상품별 변경 순번을 자동으로 올려 준다. 순번이 오르지 않으면 무시되기 때문이다. */
+    private final java.util.Map<Long, Long> versions = new java.util.HashMap<>();
+
     private void productChanged(long productId, String name, int stock) {
-        listener.handle(new ProductChangedEvent(productId, name, new BigDecimal("1000"), stock));
+        long version = versions.merge(productId, 1L, Long::sum);
+        listener.handle(new ProductChangedEvent(productId, name, new BigDecimal("1000"), stock,
+                version));
     }
 
     @Test
@@ -71,6 +78,27 @@ class OrderSummaryTest {
         // 통째로 덮어쓰면 되고, 그래서 몇 개를 놓쳐도 최신 것 하나로 수렴한다.
         assertThat(replicas.findAll()).hasSize(1);
         assertThat(replicas.findById(1L).orElseThrow().getStock()).isEqualTo(27);
+    }
+
+    @Test
+    void 이미_반영한_순번은_무시한다() {
+        listener.handle(new ProductChangedEvent(1L, "키보드", new BigDecimal("1000"), 30, 5));
+        // 순서가 뒤바뀌어 옛 이벤트가 뒤늦게 도착했다.
+        listener.handle(new ProductChangedEvent(1L, "키보드", new BigDecimal("1000"), 99, 3));
+
+        // 덮어썼다면 최신 값이 옛 값으로 되돌아간다.
+        assertThat(replicas.findById(1L).orElseThrow().getStock()).isEqualTo(30);
+        assertThat(replicas.findById(1L).orElseThrow().getVersion()).isEqualTo(5);
+    }
+
+    @Test
+    void 순번이_건너뛰어도_값은_최신으로_맞춰진다() {
+        listener.handle(new ProductChangedEvent(1L, "키보드", new BigDecimal("1000"), 30, 1));
+        // 2, 3 을 놓치고 4 가 왔다. 이벤트가 전체 상태를 싣기 때문에 값은 이것으로 맞다.
+        listener.handle(new ProductChangedEvent(1L, "키보드", new BigDecimal("1000"), 21, 4));
+
+        assertThat(replicas.findById(1L).orElseThrow().getStock()).isEqualTo(21);
+        assertThat(replicas.findById(1L).orElseThrow().getVersion()).isEqualTo(4);
     }
 
     @Test

@@ -18,6 +18,13 @@ public interface ProductClient {
     @GetMapping("/products/{id}")
     ProductResponse findById(@PathVariable("id") Long id);
 
+    /** 원본 상품 전체의 요약값. {@link ProductReplicaVerifier} 가 복제본과 대조한다. */
+    @GetMapping("/products/checksum")
+    ChecksumResponse checksum();
+
+    record ChecksumResponse(int count, String checksum) {
+    }
+
     /**
      * product-service 의 Product 와 필드가 겹치지만 일부러 공유하지 않는다.
      * 공유 모듈로 묶는 순간 두 서비스는 함께 배포해야 하는 하나의 덩어리가 된다.

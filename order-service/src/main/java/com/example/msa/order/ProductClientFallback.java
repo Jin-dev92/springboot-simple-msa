@@ -30,10 +30,28 @@ class ProductClientFallback implements FallbackFactory<ProductClient> {
 
     @Override
     public ProductClient create(Throwable cause) {
-        return id -> {
-            log.warn("product-service 조회 실패 → 주문 거절. 원인: {}", cause.toString());
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                    "상품 정보를 조회할 수 없어 주문을 받을 수 없습니다");
+        return new ProductClient() {
+
+            @Override
+            public ProductResponse findById(Long id) {
+                log.warn("product-service 조회 실패 → 주문 거절. 원인: {}", cause.toString());
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "상품 정보를 조회할 수 없어 주문을 받을 수 없습니다");
+            }
+
+            /**
+             * 여기서는 <b>던지지 않는다.</b> 위 findById 와 정반대 선택이다.
+             *
+             * <p>가격은 지어낼 수 없으니 주문을 거절해야 하지만, 체크섬 조회 실패는
+             * "복제본이 틀렸다"가 아니라 <b>"지금은 확인할 수 없다"</b>일 뿐이다.
+             * 확인 못 한 것을 불일치로 세면 상대가 잠깐 죽을 때마다 거짓 경보가 뜬다.
+             * {@code null} 을 돌려 검증기가 이번 회차를 건너뛰게 한다.
+             */
+            @Override
+            public ChecksumResponse checksum() {
+                log.debug("원본 체크섬 조회 실패. 이번 검증은 건너뛴다. 원인: {}", cause.toString());
+                return null;
+            }
         };
     }
 }

@@ -33,7 +33,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
         // 릴레이도 마찬가지다. 브로커가 없는데 발행을 시도하면 로그만 시끄러워진다.
         "outbox.poll-interval=1h",
         // 브로커가 없으므로 기동 시 재구축을 끈다.
-        "replica.rebuild-on-startup=false"
+        "replica.rebuild-on-startup=false",
+        "replica.verify.interval=1h"
 })
 class SagaTimeoutSweeperTest {
 

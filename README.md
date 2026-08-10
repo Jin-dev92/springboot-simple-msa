@@ -29,6 +29,7 @@ Spring Boot 기반 마이크로서비스 아키텍처(MSA)를 **인프라 관점
 | DB 커밋과 메시지 발행이 원자적이지 않은 것 | Transactional Outbox | [13절](docs/msa-learning-note.md#13-transactional-outbox--커밋과-발행을-하나로-묶기) |
 | 상대의 **현재** 상태로 정렬·페이징해야 하는 것 | 참조 데이터 복제 | [14절](docs/msa-learning-note.md#14-참조-데이터-복제--남의-현재-상태로-정렬하기) |
 | 복제본이 어긋나면 스스로 못 돌아오는 것 | 이벤트 재생 재구축 + 압축 토픽 | [15절](docs/msa-learning-note.md#15-복제본-재구축--자기-교정이-없는-것을-되돌리기) |
+| 어긋난 것을 아무도 모르는 것 | 갭 감지 + 체크섬 대조 | [16절](docs/msa-learning-note.md#16-복제본-검증--틀렸다는-것을-알아채기) |
 | 여러 개를 어떻게 한 번에 띄우는가 | Docker Compose | [부록 A](docs/msa-learning-note.md#부록-a-컨테이너로-묶을-때-부딪히는-것들) |
 
 ---
@@ -101,17 +102,18 @@ flowchart TB
 
 ```
 AppUser { id, username, password(BCrypt), role }
-Product { id, name, price, stock }
+Product { id, name, price, stock, version }
 Account { userId, balance }
 Order   { id, userId, productId, productName, quantity, totalPrice, status, cancelReason }
 Outbox  { id, topic, messageKey, payload, createdAt, publishedAt }   # order·product 내부
-ProductReplica { productId, name, price, stock, updatedAt }         # order-service 내부 사본
+ProductReplica { productId, name, price, stock, version, updatedAt } # order-service 내부 사본
 ```
 
 | 엔드포인트 | 권한 |
 |---|---|
 | `POST /api/auth/login` | 공개 |
 | `GET  /api/products`, `GET /api/products/{id}` | 공개 |
+| `GET  /api/products/checksum` | 공개. 복제본 대조용 요약값 |
 | `POST /api/products` | ADMIN |
 | `POST /api/orders` | 인증 필요 |
 | `GET  /api/orders`, `GET /api/orders/{id}` | 인증 필요 + 본인 것만 |
@@ -306,6 +308,21 @@ ADMIN=$(curl -s -X POST http://localhost:8080/api/auth/login -H 'Content-Type: a
 curl -s -X POST http://localhost:8080/api/orders/admin/product-replica/rebuild \
   -H "Authorization: Bearer $ADMIN"                          # {"restored":2}
 
+# 복제본 검증 — 지속되는 불일치만 경고한다
+docker compose stop kafka                                    # 복제 경로만 끊는다
+ADMIN=$(curl -s -X POST http://localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | jq -r .accessToken)
+curl -s -X POST http://localhost:8080/api/products -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' -d '{"name":"헤드셋","price":150000,"stock":20}'
+sleep 55                                                     # 15초 주기 × 임계 3회
+docker compose logs order-service | grep '계속 다르다'
+#  복제본이 원본과 계속 다르다. 재구축이 필요하다 (연속 3회, 원본 4건/..., 복제본 3건/...)
+
+docker compose start kafka
+sleep 45
+docker compose logs order-service | grep '다시 원본과 일치'
+#  복제본이 다시 원본과 일치한다 (연속 불일치 5회 뒤 회복)
+
 # 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do
   echo '{"orderId":777,"productId":1,"quantity":5,"action":"RESERVE"}' | \
@@ -350,8 +367,9 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | **10** | Transactional Outbox (order-service) | **Kafka가 죽은 채로도 주문이 접수되고**, 브로커가 돌아오면 밀린 명령이 나가 정상 완료됨 |
 | **11** | 참조 데이터 복제 + product-service Outbox | 주문 목록이 **현재 재고 적은 순으로 정렬·페이징**되고, product-service가 죽어도 그 화면이 뜸 |
 | **12** | 복제본 재구축 (압축 토픽 + 기동 시 자동 + 수동 트리거) | `restart order-service` 후에도 복제본이 살아남음 |
+| **13** | 복제본 검증 (변경 순번 갭 감지 + 체크섬 대조) | 지속되는 불일치만 경고하고 **일시적 지연은 조용히 지나감** |
 
-Phase 12까지 완료된 상태입니다.
+Phase 13까지 완료된 상태입니다.
 
 ### 앞으로 (예정)
 
@@ -368,7 +386,7 @@ Phase 12까지 완료된 상태입니다.
 
 **Phase 11은 별도 저장소를 두는 CQRS가 아니라 로컬 복제본입니다.** 상품이 3행이고 서비스를 가로지르는 화면이 하나인 규모에서는 이쪽이 맞습니다. 기제(쓰기·읽기 모델 분리, 이벤트 동기화, 결과적 일관성, 발행 신뢰성)는 같고 다른 것은 저장 위치뿐이며, 그 판단 근거는 [학습 노트 12절의 결정 트리](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것)에 있습니다.
 
-아직 다루지 않은 주제와 그 이유는 [학습 노트 17절](docs/msa-learning-note.md#17-이-프로젝트가-다루지-않은-것)에 있습니다.
+아직 다루지 않은 주제와 그 이유는 [학습 노트 18절](docs/msa-learning-note.md#18-이-프로젝트가-다루지-않은-것)에 있습니다.
 
 ---
 

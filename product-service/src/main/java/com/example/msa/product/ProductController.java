@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -33,9 +34,11 @@ class ProductController {
     private static final Logger log = LoggerFactory.getLogger(ProductController.class);
 
     private final ProductRepository repository;
+    private final ProductEventPublisher events;
 
-    ProductController(ProductRepository repository) {
+    ProductController(ProductRepository repository, ProductEventPublisher events) {
         this.repository = repository;
+        this.events = events;
     }
 
     @GetMapping
@@ -47,11 +50,17 @@ class ProductController {
      * 상품 등록. 접근 제어는 여기가 아니라 {@link SecurityConfig} 에 선언되어 있다
      * ({@code hasRole("ADMIN")}). 인증된 사용자라도 ROLE_ADMIN 이 아니면 403 이 난다.
      */
+    // 저장과 이벤트 기록을 한 트랜잭션으로 묶는다. 둘이 갈라지면 구독자의 복제본에
+    // 새 상품이 영영 나타나지 않는다.
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @Transactional
     Product create(@Valid @RequestBody ProductRequest request) {
         log.info("상품 등록: name={}", request.name());
-        return repository.save(new Product(request.name(), request.price(), request.stock()));
+        Product saved = repository.save(new Product(request.name(), request.price(),
+                request.stock()));
+        events.productChanged(saved);
+        return saved;
     }
 
     @GetMapping("/{id}")

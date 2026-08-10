@@ -27,6 +27,7 @@ Spring Boot 기반 마이크로서비스 아키텍처(MSA)를 **인프라 관점
 | 흐름이 여러 서비스에 흩어져 어디서 멈췄는지 모르는 것 | Saga 오케스트레이션 | [11절](docs/msa-learning-note.md#11-오케스트레이션--흐름을-한-곳으로-모으기) |
 | DB를 나눠 조인이 사라진 것 | 거래 시점 값 복제 + 조인 대안 여섯 가지 | [12절](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것) |
 | DB 커밋과 메시지 발행이 원자적이지 않은 것 | Transactional Outbox | [13절](docs/msa-learning-note.md#13-transactional-outbox--커밋과-발행을-하나로-묶기) |
+| 상대의 **현재** 상태로 정렬·페이징해야 하는 것 | 참조 데이터 복제 | [14절](docs/msa-learning-note.md#14-참조-데이터-복제--남의-현재-상태로-정렬하기) |
 | 여러 개를 어떻게 한 번에 띄우는가 | Docker Compose | [부록 A](docs/msa-learning-note.md#부록-a-컨테이너로-묶을-때-부딪히는-것들) |
 
 ---
@@ -102,7 +103,8 @@ AppUser { id, username, password(BCrypt), role }
 Product { id, name, price, stock }
 Account { userId, balance }
 Order   { id, userId, productId, productName, quantity, totalPrice, status, cancelReason }
-Outbox  { id, topic, messageKey, payload, createdAt, publishedAt }   # order-service 내부
+Outbox  { id, topic, messageKey, payload, createdAt, publishedAt }   # order·product 내부
+ProductReplica { productId, name, price, stock, updatedAt }         # order-service 내부 사본
 ```
 
 | 엔드포인트 | 권한 |
@@ -112,6 +114,7 @@ Outbox  { id, topic, messageKey, payload, createdAt, publishedAt }   # order-ser
 | `POST /api/products` | ADMIN |
 | `POST /api/orders` | 인증 필요 |
 | `GET  /api/orders`, `GET /api/orders/{id}` | 인증 필요 + 본인 것만 |
+| `GET  /api/orders/summary?page=&size=` | 인증 필요 + 본인 것만. 현재 재고 적은 순 |
 
 초기 계정: `user`/`user123` (ROLE_USER), `admin`/`admin123` (ROLE_ADMIN)
 
@@ -275,6 +278,20 @@ docker compose start kafka
 sleep 20
 curl -s http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"  # CONFIRMED
 
+# 참조 데이터 복제 — product-service 가 죽어도 요약 화면은 뜬다
+docker compose stop product-service
+curl -s -o /dev/null -w "products: %{http_code}\n" http://localhost:8080/api/products/1   # 500
+curl -s "http://localhost:8080/api/orders/summary" -H "Authorization: Bearer $TOKEN"       # 재고까지 나온다
+docker compose start product-service
+
+# 복제본은 낡는다 — 주문 직후엔 옛 값, 곧 수렴한다
+curl -s "http://localhost:8080/api/orders/summary" -H "Authorization: Bearer $TOKEN" | jq '.content[].currentStock'
+curl -s -X POST http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":3,"quantity":5}'
+curl -s "http://localhost:8080/api/orders/summary" -H "Authorization: Bearer $TOKEN" | jq '.content[].currentStock'   # 아직 옛 값
+sleep 8
+curl -s "http://localhost:8080/api/orders/summary" -H "Authorization: Bearer $TOKEN" | jq '.content[].currentStock'   # 수렴
+
 # 멱등성 — 같은 명령을 3번 보내도 재고는 한 번만 깎인다
 for i in 1 2 3; do
   echo '{"orderId":777,"productId":1,"quantity":5,"action":"RESERVE"}' | \
@@ -317,8 +334,9 @@ Kafka와 Zipkin 없이도 주문 생성까지는 동작합니다(이벤트 발�
 | **8** | Saga 오케스트레이션 전환 + payment-service | 결제 실패 시 재고가 되돌아감 + 참여자가 죽어도 30초 뒤 스스로 취소됨 |
 | **9** | 주문 스냅샷 — 주문 시점의 상품명을 `Order`에 함께 저장 | 상품명을 바꿔도 **과거 주문 내역의 상품명은 그대로** + 주문 목록 조회에 product-service 호출이 사라짐 |
 | **10** | Transactional Outbox (order-service) | **Kafka가 죽은 채로도 주문이 접수되고**, 브로커가 돌아오면 밀린 명령이 나가 정상 완료됨 |
+| **11** | 참조 데이터 복제 + product-service Outbox | 주문 목록이 **현재 재고 적은 순으로 정렬·페이징**되고, product-service가 죽어도 그 화면이 뜸 |
 
-Phase 10까지 완료된 상태입니다.
+Phase 11까지 완료된 상태입니다.
 
 ### 앞으로 (예정)
 
@@ -326,16 +344,17 @@ Phase 10까지 완료된 상태입니다.
 
 | Phase | 다룰 것 | 검증 기준 |
 |---|---|---|
-| **11** | CQRS 읽기 모델 | 비정규화된 조회 전용 저장소에서 정렬·페이징이 동작 + 이벤트 재생으로 재구축 가능 |
-| — | Outbox 를 참여자(product·payment)까지 확대 | 셋 다 같은 방식으로 발행 |
+| — | 복제본 재구축 | 이벤트 재생으로 `product_replica` 를 처음부터 다시 세움 |
+| — | CQRS 읽기 모델(별도 저장소) | 서비스를 가로지르는 화면이 여러 개로 늘고 조회 부하를 따로 감당해야 할 때 |
+| — | `payment-service` 까지 Outbox 확대 | 셋 다 같은 방식으로 발행 |
 
 **Phase 9는 성능 최적화가 아니라 도메인 정확성 문제입니다.** "상품명이 바뀌면 3년 전 주문 내역의 상품명도 함께 바뀌어야 하는가?"에 답이 '아니오'라면, 상품명은 조인해 올 값이 아니라 **거래 시점에 박제할 값**입니다. 이미 `totalPrice`를 그렇게 다루고 있습니다. MSA에서 겪는 조인 통증의 상당 부분은 **애초에 조인하면 안 되는 것을 조인하려다** 생기며, DB를 나눈 것이 그 사실을 드러냈을 뿐입니다.
 
-**Phase 10이 11보다 먼저인 데도 이유가 있습니다.** 재고는 다음 명령으로 자기 교정되지만 읽기 모델은 다릅니다 — **이벤트를 한 번 놓치면 영원히 모른 채 조용히 틀린 값을 내놓습니다.** Outbox 없이 읽기 모델을 올리면 그 결함을 그대로 물려받습니다.
+**Phase 10이 11보다 먼저인 데도 이유가 있습니다.** 재고는 다음 명령으로 자기 교정되지만 복제본은 다릅니다 — **이벤트를 한 번 놓치면 영원히 모른 채 조용히 낡은 값을 내놓습니다.** 그래서 Phase 11에서 `product-service`에도 Outbox를 먼저 넣었습니다.
 
-Phase 10은 `order-service`에만 적용했습니다. 참여자 둘은 아직 리스너에서 직접 발행하므로, 같은 패턴을 적용한 구간과 그렇지 않은 구간을 나란히 두고 비교할 수 있습니다.
+**Phase 11은 별도 저장소를 두는 CQRS가 아니라 로컬 복제본입니다.** 상품이 3행이고 서비스를 가로지르는 화면이 하나인 규모에서는 이쪽이 맞습니다. 기제(쓰기·읽기 모델 분리, 이벤트 동기화, 결과적 일관성, 발행 신뢰성)는 같고 다른 것은 저장 위치뿐이며, 그 판단 근거는 [학습 노트 12절의 결정 트리](docs/msa-learning-note.md#12-서비스-경계를-넘는-데이터--조인할-것과-박제할-것)에 있습니다.
 
-아직 다루지 않은 주제와 그 이유는 [학습 노트 15절](docs/msa-learning-note.md#15-이-프로젝트가-다루지-않은-것)에 있습니다.
+아직 다루지 않은 주제와 그 이유는 [학습 노트 16절](docs/msa-learning-note.md#16-이-프로젝트가-다루지-않은-것)에 있습니다.
 
 ---
 

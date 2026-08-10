@@ -23,10 +23,13 @@ class StockReservationService {
 
     private final ProductRepository repository;
     private final ProcessedCommandRepository processed;
+    private final ProductEventPublisher events;
 
-    StockReservationService(ProductRepository repository, ProcessedCommandRepository processed) {
+    StockReservationService(ProductRepository repository, ProcessedCommandRepository processed,
+            ProductEventPublisher events) {
         this.repository = repository;
         this.processed = processed;
+        this.events = events;
     }
 
     /**
@@ -82,6 +85,7 @@ class StockReservationService {
         }
 
         repository.save(product);
+        events.productChanged(product);
         log.info("재고 차감: productId={}, 주문수량={}, 남은재고={} (orderId={})",
                 command.productId(), command.quantity(), product.getStock(), command.orderId());
         return SagaReply.ok(command.orderId(), command.action());
@@ -97,6 +101,7 @@ class StockReservationService {
     private SagaReply release(Product product, StockCommand command) {
         product.increaseStock(command.quantity());
         repository.save(product);
+        events.productChanged(product);
         log.info("재고 복구(보상): productId={}, 복구수량={}, 현재재고={} (orderId={})",
                 command.productId(), command.quantity(), product.getStock(), command.orderId());
         return SagaReply.ok(command.orderId(), command.action());
